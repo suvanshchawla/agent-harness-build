@@ -85,3 +85,12 @@ async def test_forget_without_match_returns_current_facts(connect):
         reply = text(await client.call_tool("forget_memory", {"fragment": "live in Delhi"}))
         assert "nothing removed" in reply and "Lives in Delhi" in reply
         assert "removed 1" in text(await client.call_tool("forget_memory", {"fragment": "Delhi"}))
+
+
+async def test_save_memory_lists_other_facts_so_stale_ones_can_be_forgotten(connect):
+    async with connect() as client:
+        first = text(await client.call_tool("save_memory", {"fact": "Lives in Delhi"}))
+        assert "Other facts" not in first
+        second = text(await client.call_tool("save_memory", {"fact": "Lives in Mumbai"}))
+        assert second.startswith("saved: Lives in Mumbai")
+        assert "- Lives in Delhi" in second and "forget_memory" in second

@@ -70,16 +70,26 @@ def save_memory(fact: str) -> str:
     """Save one short fact about the user to long-term memory.
 
     Use whenever you learn something lasting: their name, preferences,
-    projects, recurring tasks. Duplicates are ignored.
+    projects, recurring tasks. Duplicates are ignored. If the new fact REPLACES
+    an older one (moved city, new job, changed email, no longer likes
+    something), you must also remove the outdated fact with forget_memory,
+    otherwise memory will contradict itself.
     """
     fact = fact.strip()
-    existing = [line.removeprefix("-").strip().lower() for line in _read_memory().splitlines()]
-    if fact.lower() in existing:
+    others = [line for line in _read_memory().splitlines() if line.strip().startswith("-")]
+    if fact.lower() in [line.removeprefix("-").strip().lower() for line in others]:
         return f"already known: {fact}"
     paths.MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     with paths.MEMORY_FILE.open("a", encoding="utf-8") as f:
         f.write(f"- {fact}\n")
-    return f"saved: {fact}"
+    reply = f"saved: {fact}"
+    if others:
+        reply += (
+            "\nOther facts already in memory:\n" + "\n".join(others)
+            + "\nIf any of these are now outdated or contradicted by the new fact, "
+            "remove them now with forget_memory."
+        )
+    return reply
 
 
 @mcp.tool()

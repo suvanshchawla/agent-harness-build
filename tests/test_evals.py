@@ -68,11 +68,11 @@ def test_new_checks():
     ]
 
 
-def test_memory_contradiction_needs_save_and_forget():
+def test_memory_contradiction_is_judged_by_final_state():
     case = BY_ID["memory-update-contradiction"]
-    both = [call("workspace__save_memory", fact="Lives in Mumbai"), call("workspace__forget_memory", fragment="Delhi")]
-    assert score(case, both, "ok", {}, "- Likes tea\n- Lives in Mumbai\n") == []
-    only_save = both[:1]
-    failures = score(case, only_save, "ok", {}, "- Likes tea\n- Lives in Delhi\n- Lives in Mumbai\n")
-    assert any("forget_memory" in f for f in failures)
-    assert any("Delhi" in f for f in failures)
+    save = call("workspace__save_memory", fact="Lives in Mumbai")
+    forget = call("workspace__forget_memory", fragment="Delhi")
+    assert score(case, [save, forget], "ok", {}, "- Likes tea\n- Lives in Mumbai\n") == []
+    # any route to the right state passes; leaving the old fact behind fails
+    failures = score(case, [save], "ok", {}, "- Likes tea\n- Lives in Delhi\n- Lives in Mumbai\n")
+    assert failures == ["memory still contains 'Delhi'"]

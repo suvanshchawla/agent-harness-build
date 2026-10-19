@@ -380,9 +380,6 @@
         "args": {
           "fact": "Mumbai"
         }
-      },
-      {
-        "tool": "workspace__forget_memory"
       }
     ],
     "memory_contains": [
@@ -490,5 +487,60 @@
     ],
     "tier": "hard",
     "needs_network": true
+  },
+  {
+    "id": "memory-job-change",
+    "category": "memory",
+    "tier": "hard",
+    "prompt": "I just started a new job at Beta Corp.",
+    "memory": "- Likes tea\n- Works at Acme Corp\n",
+    "memory_contains": [
+      "Beta Corp",
+      "tea"
+    ],
+    "memory_not_contains": [
+      "Acme"
+    ]
+  },
+  {
+    "id": "memory-negation",
+    "category": "memory",
+    "tier": "hard",
+    "prompt": "I don't like coffee anymore.",
+    "memory": "- Likes coffee\n- Likes tea\n",
+    "memory_contains": [
+      "tea"
+    ],
+    "memory_not_contains": [
+      "- Likes coffee"
+    ]
+  },
+  {
+    "id": "memory-value-change",
+    "category": "memory",
+    "tier": "hard",
+    "prompt": "My email address changed, it's now priya@new.com.",
+    "memory": "- Likes tea\n- Email is priya@old.com\n",
+    "memory_contains": [
+      "priya@new.com",
+      "tea"
+    ],
+    "memory_not_contains": [
+      "priya@old.com"
+    ]
+  },
+  {
+    "id": "memory-additive-keeps-old",
+    "category": "memory",
+    "tier": "hard",
+    "prompt": "I also like coffee, by the way.",
+    "memory": "- Likes tea\n",
+    "must_not_call": [
+      "workspace__forget_memory"
+    ],
+    "memory_contains": [
+      "tea",
+      "coffee"
+    ]
   }
 ]
