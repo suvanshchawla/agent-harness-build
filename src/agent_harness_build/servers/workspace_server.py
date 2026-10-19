@@ -84,12 +84,19 @@ def save_memory(fact: str) -> str:
 
 @mcp.tool()
 def forget_memory(fragment: str) -> str:
-    """Remove every remembered fact containing the given text (case-insensitive)."""
+    """Remove every remembered fact containing the given text (case-insensitive).
+
+    The text must appear verbatim in the fact, so use a short distinctive word
+    (e.g. "Delhi"), not a paraphrase. If nothing matches, the current facts are
+    returned so you can retry.
+    """
     if not paths.MEMORY_FILE.is_file() or not fragment.strip():
-        return "nothing removed"
+        return "nothing removed: memory is empty"
     lines = paths.MEMORY_FILE.read_text(encoding="utf-8").splitlines()
     kept = [line for line in lines if fragment.lower() not in line.lower()]
     removed = len(lines) - len(kept)
+    if removed == 0:
+        return f"nothing removed: no fact contains {fragment!r}. Current facts:\n" + "\n".join(lines)
     paths.MEMORY_FILE.write_text("".join(f"{line}\n" for line in kept), encoding="utf-8")
     return f"removed {removed} fact(s)"
 

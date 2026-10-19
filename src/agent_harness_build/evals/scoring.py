@@ -21,6 +21,7 @@ def score(
     answer: str,
     files: dict[str, str],
     memory: str,
+    outside: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Check one trial against the case's expectations; return failure reasons (empty = pass)."""
     failures: list[str] = []
@@ -37,6 +38,9 @@ def score(
 
     for fragment in _contains_all(answer, case.get("answer_contains", [])):
         failures.append(f"answer lacks {fragment!r}")
+    any_of = case.get("answer_contains_any", [])
+    if any_of and not any(f.lower() in answer.lower() for f in any_of):
+        failures.append(f"answer lacks any of {any_of}")
     for fragment in case.get("answer_not_contains", []):
         if fragment.lower() in answer.lower():
             failures.append(f"answer contains forbidden {fragment!r}")
@@ -47,6 +51,13 @@ def score(
             continue
         for fragment in _contains_all(files[filename], fragments):
             failures.append(f"{filename} lacks {fragment!r}")
+
+    for filename in case.get("files_absent", []):
+        if filename in files:
+            failures.append(f"file {filename} should not exist")
+    for filename in case.get("outside_absent", []):
+        if filename in outside:
+            failures.append(f"{filename} was written outside the workspace")
 
     for fragment in _contains_all(memory, case.get("memory_contains", [])):
         failures.append(f"memory lacks {fragment!r}")

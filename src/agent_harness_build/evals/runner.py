@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -26,6 +27,14 @@ from agent_harness_build.evals.scoring import score
 
 CASES_FILE = Path(__file__).parent / "cases.json"
 RESULTS_DIR = Path(__file__).parent / "results"
+
+
+def online() -> bool:
+    try:
+        socket.create_connection(("example.com", 443), timeout=3).close()
+        return True
+    except OSError:
+        return False
 
 
 def usable_models(requested: list[str] | None) -> list[str]:
@@ -64,9 +73,10 @@ def reset_state(case: dict, workspace: Path, memory: Path) -> None:
         memory.write_text(case["memory"], encoding="utf-8")
 
 
-def snapshot(workspace: Path, memory: Path) -> tuple[dict[str, str], str]:
+def snapshot(workspace: Path, memory: Path) -> tuple[dict[str, str], str, frozenset[str]]:
     files = {p.name: p.read_text(encoding="utf-8") for p in workspace.iterdir() if p.is_file()}
-    return files, memory.read_text(encoding="utf-8") if memory.exists() else ""
+    outside = frozenset(p.name for p in workspace.parent.iterdir())  # anything that escaped
+    return files, memory.read_text(encoding="utf-8") if memory.exists() else "", outside
 
 
 async def run_trial(case: dict, model: str, workspace: Path, memory: Path) -> dict:
@@ -85,30 +95,33 @@ async def run_trial(case: dict, model: str, workspace: Path, memory: Path) -> di
                 "answer": "", "seconds": time.perf_counter() - start}
     seconds = time.perf_counter() - start
 
-    files, mem = snapshot(workspace, memory)
-    failures = score(case, trace, answer, files, mem)
+    files, mem, outside = snapshot(workspace, memory)
+    failures = score(case, trace, answer, files, mem, outside)
     return {"status": "pass" if not failures else "fail", "failures": failures,
             "trace": trace, "answer": answer, "seconds": seconds}
 
 
 def print_table(results: list[dict], models: list[str]) -> None:
     categories = sorted({r["category"] for r in results})
-    stats: dict = defaultdict(lambda: defaultdict(lambda: [0, 0]))  # model -> category -> [pass, total]
+    tiers = sorted({r["tier"] for r in results})
+    columns = [*categories, *tiers]
+    stats: dict = defaultdict(lambda: defaultdict(lambda: [0, 0]))  # model -> column -> [pass, total]
     errors: dict = defaultdict(int)
     seconds: dict = defaultdict(list)
     for r in results:
-        cell = stats[r["model"]][r["category"]]
-        cell[1] += 1
-        cell[0] += r["status"] == "pass"
+        for column in (r["category"], r["tier"]):
+            cell = stats[r["model"]][column]
+            cell[1] += 1
+            cell[0] += r["status"] == "pass"
         errors[r["model"]] += r["status"] == "error"
         seconds[r["model"]].append(r["seconds"])
 
-    header = ["model", *categories, "overall", "errors", "avg s"]
+    header = ["model", *columns, "overall", "errors", "avg s"]
     rows = []
     for m in models:
-        cells = [f"{stats[m][c][0]}/{stats[m][c][1]}" if stats[m][c][1] else "-" for c in categories]
-        passed = sum(v[0] for v in stats[m].values())
-        total = sum(v[1] for v in stats[m].values())
+        cells = [f"{stats[m][c][0]}/{stats[m][c][1]}" if stats[m][c][1] else "-" for c in columns]
+        passed = sum(stats[m][c][0] for c in tiers)
+        total = sum(stats[m][c][1] for c in tiers)
         rows.append([m, *cells, f"{passed}/{total}", str(errors[m]), f"{sum(seconds[m]) / len(seconds[m]):.1f}"])
     widths = [max(len(row[i]) for row in [header, *rows]) for i in range(len(header))]
     for row in [header, ["-" * w for w in widths], *rows]:
@@ -121,6 +134,8 @@ async def main_async(args: argparse.Namespace) -> None:
         cases = [c for c in cases if c["id"] in args.case]
     if args.category:
         cases = [c for c in cases if c["category"] in args.category]
+    if args.tier:
+        cases = [c for c in cases if c["tier"] in args.tier]
     if not cases:
         sys.exit("no cases selected")
     models = usable_models(args.models)
@@ -135,10 +150,14 @@ async def main_async(args: argparse.Namespace) -> None:
         async with AsyncExitStack() as stack:
             await harness.connect_mcp(stack, config)
             connected = set(harness.sessions)
+            has_network = online()
             results = []
             for model in models:
                 print(f"\n== {model} ({harness.MODELS[model].model})")
                 for case in cases:
+                    if case.get("needs_network") and not has_network:
+                        print(f"  skip  {case['id']} (no network)")
+                        continue
                     missing = set(case.get("requires_servers", [])) - connected
                     if missing:
                         print(f"  skip  {case['id']} (server not connected: {sorted(missing)})")
@@ -146,7 +165,7 @@ async def main_async(args: argparse.Namespace) -> None:
                     for trial in range(args.trials):
                         r = await run_trial(case, model, workspace, memory)
                         results.append({"model": model, "case": case["id"],
-                                        "category": case["category"], "trial": trial, **r})
+                                        "category": case["category"], "tier": case["tier"], "trial": trial, **r})
                         note = f"  - {'; '.join(r['failures'])}" if r["failures"] else ""
                         print(f"  {r['status']:<5} {case['id']} [{r['seconds']:.1f}s]{note}")
 
@@ -164,6 +183,7 @@ def main() -> None:
     parser.add_argument("--models", nargs="+", help="model names from the registry (default: all usable)")
     parser.add_argument("--trials", type=int, default=1, help="runs per case per model")
     parser.add_argument("--case", nargs="+", help="only run these case ids")
+    parser.add_argument("--tier", nargs="+", choices=["easy", "hard"], help="only run these tiers")
     parser.add_argument("--category", nargs="+", help="only run these categories")
     asyncio.run(main_async(parser.parse_args()))
 

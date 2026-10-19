@@ -77,3 +77,11 @@ async def test_workspace_resource_and_prompts(connect):
 
         prompt = await client.get_prompt("summarize_file", {"filename": "a.md"})
         assert "a.md" in prompt.messages[0].content.text
+
+
+async def test_forget_without_match_returns_current_facts(connect):
+    async with connect() as client:
+        await client.call_tool("save_memory", {"fact": "Lives in Delhi"})
+        reply = text(await client.call_tool("forget_memory", {"fragment": "live in Delhi"}))
+        assert "nothing removed" in reply and "Lives in Delhi" in reply
+        assert "removed 1" in text(await client.call_tool("forget_memory", {"fragment": "Delhi"}))

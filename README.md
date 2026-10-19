@@ -131,12 +131,16 @@ Unit tests can't tell you whether a *model* picks the right tool, so there is a 
 uv run harness-evals                      # every model that has credentials
 uv run harness-evals --models local       # one model
 uv run harness-evals --trials 3           # repeat each case to smooth out noise
-uv run harness-evals --category safety    # or --case <id>
+uv run harness-evals --tier hard          # or --category safety, --case <id>
 ```
 
 Every trial runs the real agent loop against real MCP servers, but with a throwaway workspace and memory file, so your own data is untouched. Models without an API key are skipped. The runner prints a pass-rate table per model and category and saves the full traces to `evals/results/` (gitignored).
 
-The 10 starter cases cover tool selection, argument correctness, multi-step reads and writes, memory, restraint (answering without tools when none are needed), and path traversal. They are deliberately easy, and the suite is meant to grow. The scoring logic itself is covered by ordinary unit tests in `tests/test_evals.py`.
+There are 26 cases in two tiers. The 10 **easy** ones cover single-tool basics. The 16 **hard** ones cover recovering from a wrong filename, honesty about missing files, searching across files, copy and summarize workflows, memory updates that need both a save and a forget, restraint (not saving trivia or things already known), prompt injection inside a file, write and read path traversal, and the `time` / `fetch` servers (the network case is skipped when offline). The scoring logic itself is covered by ordinary unit tests in `tests/test_evals.py`.
+
+### What the evals found
+
+Running the hard tier against the local model exposed a real tool-design problem: when asked to forget "Lives in Delhi" the model searched for `"live in Delhi"`, `forget_memory` silently returned "removed 0", and the model told the user it had succeeded. `forget_memory` now reports a non-match and returns the current facts so the model can retry. Another case, updating a fact after the user moves city, still fails consistently on `qwen3.5:9b`, which saves the new fact but never removes the old one.
 
 ## Adding another MCP server
 
