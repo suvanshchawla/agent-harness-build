@@ -60,6 +60,7 @@ src/agent_harness_build/
   mcp_servers.json           MCP servers the harness launches
   servers/
     workspace_server.py      the custom MCP server
+scripts/inspect_server.py    demo client that exercises the workspace server
 tests/                       pytest suite (in-memory MCP client + a stdio integration test)
 examples/                    v0-v4: the step-by-step build-up to the harness
 ```
@@ -104,6 +105,19 @@ uv run workspace-server
 | Prompt | `daily_review`, `summarize_file` | Reusable prompt templates |
 
 Set `AGENT_WORKSPACE` and `AGENT_MEMORY_FILE` to change where files and memory live.
+
+### Trying the server by hand
+
+A stdio server prints nothing when started directly, because it waits for a client. Two ways to poke at it:
+
+```bash
+# 1. Python script: lists everything the server exposes and calls a few tools.
+#    Uses a temporary workspace, so your real files and memory are untouched.
+uv run python scripts/inspect_server.py
+
+# 2. MCP Inspector: a browser UI for the tools, resources and prompts (needs Node 22.19+).
+npx @modelcontextprotocol/inspector uv run workspace-server
+```
 
 ## Adding another MCP server
 

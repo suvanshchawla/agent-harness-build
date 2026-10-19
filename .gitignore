@@ -11,3 +11,18 @@ wheels/
 
 # Secrets
 .env
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node (MCP Inspector)
+node_modules/
+
+# Editor / OS
+.DS_Store
+
+# Personal runtime data (created when the harness runs)
+src/agent_harness_build/memory.md
+src/agent_harness_build/workspace/
