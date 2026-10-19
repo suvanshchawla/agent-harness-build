@@ -1,8 +1,8 @@
 import asyncio
 import json
 import os
+import sys
 from contextlib import AsyncExitStack
-from pathlib import Path
 
 from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
@@ -10,10 +10,7 @@ from mcp.client.stdio import stdio_client
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-ROOT = Path(__file__).parent
-WORKSPACE = ROOT / "workspace"
-MEMORY_FILE = ROOT / "memory.md"
-MCP_CONFIG = ROOT / "mcp_servers.json"
+from agent_harness_build.paths import MCP_CONFIG, ROOT, WORKSPACE
 
 load_dotenv(ROOT.parents[1] / ".env")  # project-root .env, untracked
 
@@ -51,113 +48,6 @@ MODELS: dict[str, ModelConfig] = {
 model_name = "local"  # switch at runtime with /model
 
 
-# ---------------------------------------------------------------------------
-# Pillar 2: memory. A markdown file in the prompt + a tool to append to it.
-# ---------------------------------------------------------------------------
-
-def load_memory() -> str:
-    if MEMORY_FILE.is_file():
-        return MEMORY_FILE.read_text(encoding="utf-8")
-    return "(nothing saved yet)"
-
-
-def save_memory(fact: str) -> str:
-    with MEMORY_FILE.open("a", encoding="utf-8") as f:
-        f.write(f"- {fact}\n")
-    return f"saved: {fact}"
-
-
-# ---------------------------------------------------------------------------
-# Local tools (the ones we wrote by hand back in v1)
-# ---------------------------------------------------------------------------
-
-def _safe_path(filename: str) -> Path | None:
-    """Resolve filename inside WORKSPACE; None if it would escape the folder."""
-    path = (WORKSPACE / filename).resolve()
-    return path if path.is_relative_to(WORKSPACE.resolve()) else None
-
-
-def list_files() -> str:
-    return "\n".join(p.name for p in WORKSPACE.iterdir()) or "(empty)"
-
-
-def read_file(filename: str) -> str:
-    path = _safe_path(filename)
-    if path is None:
-        return "error: path is outside the workspace"
-    return path.read_text(encoding="utf-8") if path.is_file() else f"error: no {filename}"
-
-
-def write_file(filename: str, content: str) -> str:
-    path = _safe_path(filename)
-    if path is None:
-        return "error: path is outside the workspace"
-    path.write_text(content, encoding="utf-8")
-    return f"wrote {filename}"
-
-
-LOCAL_TOOLS = {
-    "list_files": list_files,
-    "read_file": read_file,
-    "write_file": write_file,
-    "save_memory": save_memory,
-}
-
-TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_files",
-            "description": "List the files in the user's workspace folder.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read one file from the user's workspace folder.",
-            "parameters": {
-                "type": "object",
-                "properties": {"filename": {"type": "string"}},
-                "required": ["filename"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write a file in the user's workspace folder.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filename": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-                "required": ["filename", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "save_memory",
-            "description": (
-                "Save one short fact about the user to long-term memory. "
-                "Use whenever you learn something lasting: their name, "
-                "preferences, projects, recurring tasks."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {"fact": {"type": "string"}},
-                "required": ["fact"],
-            },
-        },
-    },
-]
-
-
 SYSTEM_PROMPT = """You are a helpful personal assistant running inside a \
 custom harness. Be concise.
 
@@ -168,55 +58,77 @@ lack access to the user's files or tasks - use your tools to look.
 Here is what you remember about the user from previous sessions:
 {memory}
 
-When you learn a new lasting fact about the user, save it with save_memory."""
+When you learn a new lasting fact about the user, save it with the save_memory tool."""
 
 # the running conversation - shared by every model we switch to
-messages = [{"role": "system", "content": SYSTEM_PROMPT.format(memory=load_memory())}]
+messages: list = [{"role": "system", "content": SYSTEM_PROMPT.format(memory="(not loaded)")}]
 
 
 # ---------------------------------------------------------------------------
-# Pillar 1: MCP (same component we built in v3)
+# Pillar 1: MCP. Every tool - including our own workspace/memory ones - comes
+# from an MCP server listed in mcp_servers.json. Tool names are prefixed with
+# the server name ("workspace__read_file") so two servers can't collide.
 # ---------------------------------------------------------------------------
 
-mcp_sessions: dict[str, ClientSession] = {}  # tool name -> its server session
+TOOL_SCHEMAS: list[dict] = []
+tool_routes: dict[str, tuple[ClientSession, str]] = {}  # exposed name -> (session, real name)
+prompt_routes: dict[str, tuple[ClientSession, str]] = {}  # "server/prompt" -> (session, name)
+sessions: dict[str, ClientSession] = {}  # server name -> session
 
 
 async def connect_mcp(stack: AsyncExitStack):
-    """Launch every server in mcp_servers.json and merge in its tools."""
+    """Launch every server in mcp_servers.json and register its tools and prompts."""
     config = json.loads(MCP_CONFIG.read_text(encoding="utf-8"))
     for name, spec in config["mcpServers"].items():
-        params = StdioServerParameters(command=spec["command"], args=spec["args"])
+        command = sys.executable if spec["command"] == "{python}" else spec["command"]
+        params = StdioServerParameters(command=command, args=spec["args"])
         try:
             read, write = await stack.enter_async_context(stdio_client(params))
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
+            tools = (await session.list_tools()).tools
+            prompts = (await session.list_prompts()).prompts
         except Exception as e:
             print(f"  [mcp] '{name}' failed to start: {e}")
             continue
 
-        tools = (await session.list_tools()).tools
+        sessions[name] = session
         for tool in tools:
-            mcp_sessions[tool.name] = session
+            exposed = f"{name}__{tool.name}"
+            tool_routes[exposed] = (session, tool.name)
             TOOL_SCHEMAS.append(
                 {
                     "type": "function",
                     "function": {
-                        "name": tool.name,
-                        "description": tool.description,
+                        "name": exposed,
+                        "description": tool.description or "",
                         "parameters": tool.input_schema,
                     },
                 }
             )
+        for prompt in prompts:
+            prompt_routes[f"{name}/{prompt.name}"] = (session, prompt.name)
         print(f"  [mcp] connected '{name}': {[t.name for t in tools]}")
 
 
+async def read_memory() -> str:
+    """Fetch the memory://facts resource from whichever server provides it."""
+    for session in sessions.values():
+        try:
+            result = await session.read_resource("memory://facts")
+        except Exception:
+            continue
+        return "".join(c.text for c in result.contents if hasattr(c, "text")).strip() or "(nothing saved yet)"
+    return "(memory unavailable)"
+
+
 async def call_tool(name: str, args: dict) -> str:
-    if name in LOCAL_TOOLS:
-        return LOCAL_TOOLS[name](**args)
-    if name in mcp_sessions:
-        result = await mcp_sessions[name].call_tool(name, args)
-        return "\n".join(c.text for c in result.content if hasattr(c, "text"))
-    return f"error: unknown tool {name}"
+    if name not in tool_routes:
+        return f"error: unknown tool {name}"
+    session, real_name = tool_routes[name]
+    result = await session.call_tool(real_name, args)
+    text = "\n".join(c.text for c in result.content if hasattr(c, "text"))
+    return f"error: {text}" if result.is_error else text
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +163,7 @@ async def run_agent(user_message: str) -> str:
 # Slash commands
 # ---------------------------------------------------------------------------
 
-def handle_command(line: str) -> bool:
+async def handle_command(line: str) -> bool:
     """Returns True if the line was a command."""
     global model_name
     if not line.startswith("/"):
@@ -270,14 +182,26 @@ def handle_command(line: str) -> bool:
     elif cmd == "/tools":
         for schema in TOOL_SCHEMAS:
             fn = schema["function"]
-            origin = "local" if fn["name"] in LOCAL_TOOLS else "mcp"
-            print(f"  [{origin}] {fn['name']}: {fn['description'][:60]}")
+            print(f"  {fn['name']}: {' '.join(fn['description'].split())[:60]}")
     elif cmd == "/memory":
-        print(load_memory())
+        print(await read_memory())
+    elif cmd == "/prompts":
+        for key in prompt_routes:
+            print(f"  {key}")
+    elif cmd == "/prompt":
+        # /prompt workspace/summarize_file filename=notes.md
+        key, *pairs = arg.split()
+        if key not in prompt_routes:
+            print(f"  unknown prompt '{key}' - try /prompts")
+        else:
+            session, name = prompt_routes[key]
+            result = await session.get_prompt(name, dict(p.split("=", 1) for p in pairs))
+            text = "\n".join(m.content.text for m in result.messages if hasattr(m.content, "text"))
+            print("\nassistant:", await run_agent(text), "\n")
     elif cmd == "/quit":
         raise SystemExit
     else:
-        print("  commands: /models /model <name> /tools /memory /quit")
+        print("  commands: /models /model <name> /tools /memory /prompts /prompt <server/name> [k=v ...] /quit")
     return True
 
 
@@ -286,16 +210,17 @@ async def main():
     async with AsyncExitStack() as stack:
         print("starting harness...")
         await connect_mcp(stack)
+        messages[0]["content"] = SYSTEM_PROMPT.format(memory=await read_memory())
         print(
             f"\nharness ready - model: {model_name} "
             f"({MODELS[model_name].model}), "
             f"{len(TOOL_SCHEMAS)} tools, memory loaded"
         )
-        print("type /models, /model <name>, /tools, /memory, or just talk\n")
+        print("type /models, /model <name>, /tools, /memory, /prompts, or just talk\n")
         try:
             while True:
                 line = (await asyncio.to_thread(input, "you: ")).strip()
-                if not line or handle_command(line):
+                if not line or await handle_command(line):
                     continue
                 print("\nassistant:", await run_agent(line), "\n")
         except (EOFError, KeyboardInterrupt, SystemExit):

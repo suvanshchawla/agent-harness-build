@@ -1,5 +1,9 @@
 {
   "mcpServers": {
+    "workspace": {
+      "command": "{python}",
+      "args": ["-m", "agent_harness_build.servers.workspace_server"]
+    },
     "time": {
       "command": "uvx",
       "args": ["mcp-server-time"]
