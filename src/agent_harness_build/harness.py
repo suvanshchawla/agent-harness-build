@@ -146,16 +146,18 @@ async def run_agent(
     model: str | None = None,
     trace: list | None = None,
     verbose: bool = True,
+    client: AsyncOpenAI | None = None,
 ) -> str:
     """Run one user turn to completion.
 
     history/model default to the interactive session; the eval runner passes its
-    own. If trace is given, every tool call is appended to it as
+    own. client defaults to one built from the model registry (tests inject a fake).
+    If trace is given, every tool call is appended to it as
     {"tool", "args", "result"}.
     """
     history = messages if history is None else history
     cfg = MODELS[model or model_name]
-    client = AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
+    client = client or AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
 
     history.append({"role": "user", "content": user_message})
     for _ in range(MAX_STEPS):

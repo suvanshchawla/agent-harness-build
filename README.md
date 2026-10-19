@@ -176,7 +176,7 @@ An optional `"env": {...}` object sets environment variables for the server proc
 uv run pytest
 ```
 
-The suite needs no model or API key, and CI runs it (plus `ruff`) on every push and pull request. It covers each tool, resource and prompt, path-traversal rejection, memory deduplication, and a real stdio connection from the harness to the workspace server.
+The suite needs no model or API key, and CI runs it (plus `ruff`) on every push and pull request. It covers the agent loop (driven by a scripted fake model: tool routing, results fed back, the step cap, error handling), each tool, resource and prompt, path-traversal rejection, memory deduplication, and a real stdio connection from the harness to the workspace server.
 
 ## Design notes
 
