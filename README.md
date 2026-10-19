@@ -136,11 +136,27 @@ uv run harness-evals --tier hard          # or --category safety, --case <id>
 
 Every trial runs the real agent loop against real MCP servers, but with a throwaway workspace and memory file, so your own data is untouched. Models without an API key are skipped. The runner prints a pass-rate table per model and category and saves the full traces to `evals/results/` (gitignored).
 
-There are 26 cases in two tiers. The 10 **easy** ones cover single-tool basics. The 16 **hard** ones cover recovering from a wrong filename, honesty about missing files, searching across files, copy and summarize workflows, memory updates that need both a save and a forget, restraint (not saving trivia or things already known), prompt injection inside a file, write and read path traversal, and the `time` / `fetch` servers (the network case is skipped when offline). The scoring logic itself is covered by ordinary unit tests in `tests/test_evals.py`.
+There are 30 cases in two tiers. The 10 **easy** ones cover single-tool basics. The 20 **hard** ones cover recovering from a wrong filename, honesty about missing files, searching across files, copy and summarize workflows, memory updates where an old fact becomes outdated (plus a control that must keep the old fact), restraint (not saving trivia or things already known), prompt injection inside a file, write and read path traversal, and the `time` / `fetch` servers (the network case is skipped when offline). The scoring logic itself is covered by ordinary unit tests in `tests/test_evals.py`.
 
 ### What the evals found
 
-Running the hard tier against the local model exposed a real tool-design problem: when asked to forget "Lives in Delhi" the model searched for `"live in Delhi"`, `forget_memory` silently returned "removed 0", and the model told the user it had succeeded. `forget_memory` now reports a non-match and returns the current facts so the model can retry. Another case, updating a fact after the user moves city, still fails consistently on `qwen3.5:9b`, which saves the new fact but never removes the old one.
+The evals found two real tool-design problems on the local `qwen3.5:9b`, and both were fixed in the server rather than by tuning prompts.
+
+**1. `forget_memory` failed silently.** Asked to forget "Lives in Delhi", the model searched for `"live in Delhi"`. The tool returned "removed 0", and the model told the user it had succeeded. The tool now says nothing matched and returns the current facts so the model can retry.
+
+**2. Memory contradicted itself.** When the user said "I've moved to Mumbai", the model saved the new fact but left "Lives in Delhi" in memory. Four cases cover this (a move, a job change, "I don't like coffee anymore", a changed email), plus a control where the old fact must be kept. They check the final memory contents, not which tools were called, so any route to the right state passes. The fix was in the tool: `save_memory` now returns the other stored facts and asks the model to `forget_memory` any that are outdated, and its description says that a replacing fact needs the old one removed.
+
+| Case (5 trials, local model) | Before | After |
+| --- | --- | --- |
+| Move city | 1/5 | 5/5 |
+| Job change | 0/5 | 5/5 |
+| No longer likes X | 2/5 | 5/5 |
+| Changed email | 2/5 | 5/5 |
+| Control: "I also like coffee" keeps the old fact | 5/5 | 5/5 |
+
+The control matters: the nudge did not make the model delete facts it should have kept.
+
+Caveats: this is one small model and 5 trials per case, so treat the numbers as a strong signal on this model and no more. One restraint case got no better (the model re-saves a fact it already knows, which the tool ignores as a duplicate), and it may simply be too strict.
 
 ## Adding another MCP server
 
