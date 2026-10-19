@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from contextlib import AsyncExitStack
+from pathlib import Path
 
 from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
@@ -76,12 +77,12 @@ prompt_routes: dict[str, tuple[ClientSession, str]] = {}  # "server/prompt" -> (
 sessions: dict[str, ClientSession] = {}  # server name -> session
 
 
-async def connect_mcp(stack: AsyncExitStack):
-    """Launch every server in mcp_servers.json and register its tools and prompts."""
-    config = json.loads(MCP_CONFIG.read_text(encoding="utf-8"))
+async def connect_mcp(stack: AsyncExitStack, config_path: Path | None = None):
+    """Launch every server in the config (default mcp_servers.json) and register its tools and prompts."""
+    config = json.loads((config_path or MCP_CONFIG).read_text(encoding="utf-8"))
     for name, spec in config["mcpServers"].items():
         command = sys.executable if spec["command"] == "{python}" else spec["command"]
-        params = StdioServerParameters(command=command, args=spec["args"])
+        params = StdioServerParameters(command=command, args=spec["args"], env=spec.get("env"))
         try:
             read, write = await stack.enter_async_context(stdio_client(params))
             session = await stack.enter_async_context(ClientSession(read, write))
@@ -135,28 +136,46 @@ async def call_tool(name: str, args: dict) -> str:
 # The agent loop (unchanged since v2)
 # ---------------------------------------------------------------------------
 
-async def run_agent(user_message: str) -> str:
-    cfg = MODELS[model_name]
+MAX_STEPS = 10  # model round-trips per user message before we give up
+
+
+async def run_agent(
+    user_message: str,
+    history: list | None = None,
+    model: str | None = None,
+    trace: list | None = None,
+    verbose: bool = True,
+) -> str:
+    """Run one user turn to completion.
+
+    history/model default to the interactive session; the eval runner passes its
+    own. If trace is given, every tool call is appended to it as
+    {"tool", "args", "result"}.
+    """
+    history = messages if history is None else history
+    cfg = MODELS[model or model_name]
     client = AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
 
-    messages.append({"role": "user", "content": user_message})
-    while True:
+    history.append({"role": "user", "content": user_message})
+    for _ in range(MAX_STEPS):
         response = await client.chat.completions.create(
-            model=cfg.model, messages=messages, tools=TOOL_SCHEMAS
+            model=cfg.model, messages=history, tools=TOOL_SCHEMAS
         )
         message = response.choices[0].message
         if not message.tool_calls:
-            messages.append({"role": "assistant", "content": message.content})
+            history.append({"role": "assistant", "content": message.content})
             return message.content or ""
 
-        messages.append(message)
+        history.append(message)
         for call in message.tool_calls:
             args = json.loads(call.function.arguments or "{}")
-            print(f"  [tool] {call.function.name}({args})")
+            if verbose:
+                print(f"  [tool] {call.function.name}({args})")
             result = await call_tool(call.function.name, args)
-            messages.append(
-                {"role": "tool", "tool_call_id": call.id, "content": result}
-            )
+            if trace is not None:
+                trace.append({"tool": call.function.name, "args": args, "result": result})
+            history.append({"role": "tool", "tool_call_id": call.id, "content": result})
+    return f"(stopped after {MAX_STEPS} steps without a final answer)"
 
 
 # ---------------------------------------------------------------------------
