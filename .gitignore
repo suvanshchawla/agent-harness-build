@@ -26,3 +26,6 @@ node_modules/
 # Personal runtime data (created when the harness runs)
 src/agent_harness_build/memory.md
 src/agent_harness_build/workspace/
+
+# Eval run outputs
+src/agent_harness_build/evals/results/

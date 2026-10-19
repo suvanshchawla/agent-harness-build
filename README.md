@@ -60,6 +60,10 @@ src/agent_harness_build/
   mcp_servers.json           MCP servers the harness launches
   servers/
     workspace_server.py      the custom MCP server
+  evals/
+    cases.json               eval cases (prompt + expected behaviour)
+    scoring.py               pure scoring logic, unit tested
+    runner.py                runs the cases against each model
 scripts/inspect_server.py    demo client that exercises the workspace server
 tests/                       pytest suite (in-memory MCP client + a stdio integration test)
 examples/                    v0-v4: the step-by-step build-up to the harness
@@ -119,6 +123,21 @@ uv run python scripts/inspect_server.py
 npx @modelcontextprotocol/inspector uv run workspace-server
 ```
 
+## Evals
+
+Unit tests can't tell you whether a *model* picks the right tool, so there is a small eval suite. Each case in `src/agent_harness_build/evals/cases.json` is a prompt plus expectations: which tools should (or should not) be called with which arguments, what the answer should contain, and what the workspace files and memory should look like afterwards.
+
+```bash
+uv run harness-evals                      # every model that has credentials
+uv run harness-evals --models local       # one model
+uv run harness-evals --trials 3           # repeat each case to smooth out noise
+uv run harness-evals --category safety    # or --case <id>
+```
+
+Every trial runs the real agent loop against real MCP servers, but with a throwaway workspace and memory file, so your own data is untouched. Models without an API key are skipped. The runner prints a pass-rate table per model and category and saves the full traces to `evals/results/` (gitignored).
+
+The 10 starter cases cover tool selection, argument correctness, multi-step reads and writes, memory, restraint (answering without tools when none are needed), and path traversal. They are deliberately easy, and the suite is meant to grow. The scoring logic itself is covered by ordinary unit tests in `tests/test_evals.py`.
+
 ## Adding another MCP server
 
 Add an entry to `src/agent_harness_build/mcp_servers.json`:
@@ -127,7 +146,7 @@ Add an entry to `src/agent_harness_build/mcp_servers.json`:
 "my-server": { "command": "uvx", "args": ["my-mcp-server"] }
 ```
 
-Its tools appear in `/tools` as `my-server__<tool>`. The special command `{python}` expands to the current interpreter, which is how the bundled workspace server is launched.
+An optional `"env": {...}` object sets environment variables for the server process. Its tools appear in `/tools` as `my-server__<tool>`. The special command `{python}` expands to the current interpreter, which is how the bundled workspace server is launched.
 
 ## Tests
 
@@ -135,7 +154,7 @@ Its tools appear in `/tools` as `my-server__<tool>`. The special command `{pytho
 uv run pytest
 ```
 
-The suite covers each tool, resource and prompt, path-traversal rejection, memory deduplication, and a real stdio connection from the harness to the workspace server.
+The suite needs no model or API key. It covers each tool, resource and prompt, path-traversal rejection, memory deduplication, and a real stdio connection from the harness to the workspace server.
 
 ## Design notes
 
@@ -145,8 +164,8 @@ The suite covers each tool, resource and prompt, path-traversal rejection, memor
 
 ## Roadmap
 
+- Harder eval cases and a comparison across cloud models
 - Streaming responses and parallel tool calls
 - Approval prompts for write operations
 - Embedding-based memory retrieval
-- Model comparison evals
 - CI (lint and tests)

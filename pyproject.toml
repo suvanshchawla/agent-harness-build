@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 agent-harness-build = "agent_harness_build:main"
+harness-evals = "agent_harness_build.evals.runner:main"
 workspace-server = "agent_harness_build.servers.workspace_server:main"
 
 [build-system]
