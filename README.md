@@ -1,5 +1,7 @@
 # agent-harness-build
 
+[![CI](https://github.com/suvanshchawla/agent-harness-build/actions/workflows/ci.yml/badge.svg)](https://github.com/suvanshchawla/agent-harness-build/actions/workflows/ci.yml)
+
 A small, provider-agnostic **AI agent harness** built around the **Model Context Protocol (MCP)**.
 
 - One tool-calling loop that works with any OpenAI-compatible endpoint: local models via Ollama, OpenAI, and Anthropic. Switch models mid-conversation with `/model`.
@@ -174,7 +176,7 @@ An optional `"env": {...}` object sets environment variables for the server proc
 uv run pytest
 ```
 
-The suite needs no model or API key. It covers each tool, resource and prompt, path-traversal rejection, memory deduplication, and a real stdio connection from the harness to the workspace server.
+The suite needs no model or API key, and CI runs it (plus `ruff`) on every push and pull request. It covers each tool, resource and prompt, path-traversal rejection, memory deduplication, and a real stdio connection from the harness to the workspace server.
 
 ## Design notes
 
@@ -188,7 +190,6 @@ The suite needs no model or API key. It covers each tool, resource and prompt, p
 - Streaming responses and parallel tool calls
 - Approval prompts for write operations
 - Embedding-based memory retrieval
-- CI (lint and tests)
 
 ## License
 
