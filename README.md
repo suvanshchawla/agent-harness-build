@@ -189,3 +189,7 @@ The suite needs no model or API key. It covers each tool, resource and prompt, p
 - Approval prompts for write operations
 - Embedding-based memory retrieval
 - CI (lint and tests)
+
+## License
+
+MIT, see [LICENSE](LICENSE).
