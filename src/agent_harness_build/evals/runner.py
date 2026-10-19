@@ -91,14 +91,24 @@ async def run_trial(case: dict, model: str, workspace: Path, memory: Path) -> di
             case["prompt"], history=history, model=model, trace=trace, verbose=False
         )
     except Exception as e:  # network down, bad key, model rejects tools...
-        return {"status": "error", "failures": [f"{type(e).__name__}: {e}"], "trace": trace,
-                "answer": "", "seconds": time.perf_counter() - start}
+        return {
+            "status": "error",
+            "failures": [f"{type(e).__name__}: {e}"],
+            "trace": trace,
+            "answer": "",
+            "seconds": time.perf_counter() - start,
+        }
     seconds = time.perf_counter() - start
 
     files, mem, outside = snapshot(workspace, memory)
     failures = score(case, trace, answer, files, mem, outside)
-    return {"status": "pass" if not failures else "fail", "failures": failures,
-            "trace": trace, "answer": answer, "seconds": seconds}
+    return {
+        "status": "pass" if not failures else "fail",
+        "failures": failures,
+        "trace": trace,
+        "answer": answer,
+        "seconds": seconds,
+    }
 
 
 def print_table(results: list[dict], models: list[str]) -> None:
@@ -122,10 +132,12 @@ def print_table(results: list[dict], models: list[str]) -> None:
         cells = [f"{stats[m][c][0]}/{stats[m][c][1]}" if stats[m][c][1] else "-" for c in columns]
         passed = sum(stats[m][c][0] for c in tiers)
         total = sum(stats[m][c][1] for c in tiers)
-        rows.append([m, *cells, f"{passed}/{total}", str(errors[m]), f"{sum(seconds[m]) / len(seconds[m]):.1f}"])
+        rows.append(
+            [m, *cells, f"{passed}/{total}", str(errors[m]), f"{sum(seconds[m]) / len(seconds[m]):.1f}"]
+        )
     widths = [max(len(row[i]) for row in [header, *rows]) for i in range(len(header))]
     for row in [header, ["-" * w for w in widths], *rows]:
-        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)))
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
 
 
 async def main_async(args: argparse.Namespace) -> None:
@@ -164,8 +176,16 @@ async def main_async(args: argparse.Namespace) -> None:
                         continue
                     for trial in range(args.trials):
                         r = await run_trial(case, model, workspace, memory)
-                        results.append({"model": model, "case": case["id"],
-                                        "category": case["category"], "tier": case["tier"], "trial": trial, **r})
+                        results.append(
+                            {
+                                "model": model,
+                                "case": case["id"],
+                                "category": case["category"],
+                                "tier": case["tier"],
+                                "trial": trial,
+                                **r,
+                            }
+                        )
                         note = f"  - {'; '.join(r['failures'])}" if r["failures"] else ""
                         print(f"  {r['status']:<5} {case['id']} [{r['seconds']:.1f}s]{note}")
 

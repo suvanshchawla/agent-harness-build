@@ -27,8 +27,16 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "ruff>=0.17.1",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+extend-exclude = ["examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -3,9 +3,7 @@ from pathlib import Path
 
 from agent_harness_build.evals.scoring import score
 
-CASES = json.loads(
-    (Path(__file__).parents[1] / "src/agent_harness_build/evals/cases.json").read_text()
-)
+CASES = json.loads((Path(__file__).parents[1] / "src/agent_harness_build/evals/cases.json").read_text())
 BY_ID = {c["id"]: c for c in CASES}
 
 

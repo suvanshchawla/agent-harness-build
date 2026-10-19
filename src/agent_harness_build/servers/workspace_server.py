@@ -36,6 +36,7 @@ def _read_memory() -> str:
 # Tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
 def list_files() -> str:
     """List the files in the user's workspace folder."""
@@ -85,7 +86,8 @@ def save_memory(fact: str) -> str:
     reply = f"saved: {fact}"
     if others:
         reply += (
-            "\nOther facts already in memory:\n" + "\n".join(others)
+            "\nOther facts already in memory:\n"
+            + "\n".join(others)
             + "\nIf any of these are now outdated or contradicted by the new fact, "
             "remove them now with forget_memory."
         )
@@ -115,6 +117,7 @@ def forget_memory(fragment: str) -> str:
 # Resources
 # ---------------------------------------------------------------------------
 
+
 @mcp.resource("memory://facts", mime_type="text/markdown")
 def memory_facts() -> str:
     """Everything remembered about the user."""
@@ -130,6 +133,7 @@ def workspace_file(filename: str) -> str:
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
+
 
 @mcp.prompt()
 def daily_review() -> str:

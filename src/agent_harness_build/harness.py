@@ -21,6 +21,7 @@ load_dotenv(ROOT.parents[1] / ".env")  # project-root .env, untracked
 # endpoint. Cloud or local, frontier or free - same client, same harness.
 # ---------------------------------------------------------------------------
 
+
 class ModelConfig(BaseModel):
     base_url: str
     api_key: str = "none"
@@ -158,9 +159,7 @@ async def run_agent(
 
     history.append({"role": "user", "content": user_message})
     for _ in range(MAX_STEPS):
-        response = await client.chat.completions.create(
-            model=cfg.model, messages=history, tools=TOOL_SCHEMAS
-        )
+        response = await client.chat.completions.create(model=cfg.model, messages=history, tools=TOOL_SCHEMAS)
         message = response.choices[0].message
         if not message.tool_calls:
             history.append({"role": "assistant", "content": message.content})
@@ -181,6 +180,7 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 # Slash commands
 # ---------------------------------------------------------------------------
+
 
 async def handle_command(line: str) -> bool:
     """Returns True if the line was a command."""
@@ -220,7 +220,9 @@ async def handle_command(line: str) -> bool:
     elif cmd == "/quit":
         raise SystemExit
     else:
-        print("  commands: /models /model <name> /tools /memory /prompts /prompt <server/name> [k=v ...] /quit")
+        print(
+            "  commands: /models /model <name> /tools /memory /prompts /prompt <server/name> [k=v ...] /quit"
+        )
     return True
 
 

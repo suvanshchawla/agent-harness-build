@@ -8,10 +8,18 @@ from agent_harness_build import harness
 
 async def test_harness_connects_to_workspace_server(tmp_path, monkeypatch):
     config = tmp_path / "servers.json"
-    config.write_text(json.dumps({"mcpServers": {"workspace": {
-        "command": "{python}",
-        "args": ["-m", "agent_harness_build.servers.workspace_server"],
-    }}}))
+    config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "workspace": {
+                        "command": "{python}",
+                        "args": ["-m", "agent_harness_build.servers.workspace_server"],
+                    }
+                }
+            }
+        )
+    )
     monkeypatch.setattr(harness, "MCP_CONFIG", config)
     for registry in (harness.TOOL_SCHEMAS, harness.tool_routes, harness.prompt_routes, harness.sessions):
         registry.clear()
