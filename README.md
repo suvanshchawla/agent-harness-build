@@ -1,0 +1,138 @@
+# agent-harness-build
+
+A small, provider-agnostic **AI agent harness** built around the **Model Context Protocol (MCP)**.
+
+- One tool-calling loop that works with any OpenAI-compatible endpoint: local models via Ollama, OpenAI, and Anthropic. Switch models mid-conversation with `/model`.
+- An **MCP client** that launches servers from a JSON config and exposes all of their tools to the model.
+- A **custom MCP server** (`workspace`) that provides file tools, long-term memory, resources and prompts, covering all three MCP primitives.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    User([User]) <--> CLI
+
+    subgraph Harness["harness.py"]
+        CLI["Chat loop and slash commands"]
+        Loop["Agent loop<br/>(tool-calling)"]
+        Router["MCP client<br/>tool / prompt / resource routing"]
+        CLI --> Loop
+        Loop <--> Router
+    end
+
+    Loop <-->|"OpenAI-compatible<br/>chat completions"| Models
+
+    subgraph Models["Model registry"]
+        Local["local: Ollama"]
+        GPT["gpt: OpenAI"]
+        Claude["claude: Anthropic"]
+    end
+
+    Router <-->|stdio| WS
+    Router <-->|stdio| Time["time (uvx)"]
+    Router <-->|stdio| Fetch["fetch (uvx)"]
+
+    subgraph WS["workspace server (this repo)"]
+        Tools["Tools<br/>list_files, read_file, write_file<br/>save_memory, forget_memory"]
+        Res["Resources<br/>memory://facts<br/>workspace://{filename}"]
+        Prompts["Prompts<br/>daily_review, summarize_file"]
+    end
+
+    Tools --- Files[("workspace/")]
+    Tools --- Mem[("memory.md")]
+    Res --- Files
+    Res --- Mem
+```
+
+### How a turn works
+
+1. On startup the harness reads `mcp_servers.json`, spawns each server over stdio, and collects their tools and prompts.
+2. Tool names are prefixed with the server name (`workspace__read_file`), so two servers can't collide.
+3. The long-term memory shown in the system prompt is fetched from the `memory://facts` **resource**, not read from disk directly.
+4. The model's tool calls are routed back to the owning MCP session, and results are appended to the conversation until the model answers in plain text.
+
+## Project layout
+
+```
+src/agent_harness_build/
+  harness.py                 chat loop, agent loop, MCP client, slash commands
+  paths.py                   workspace / memory locations shared by harness and servers
+  mcp_servers.json           MCP servers the harness launches
+  servers/
+    workspace_server.py      the custom MCP server
+tests/                       pytest suite (in-memory MCP client + a stdio integration test)
+examples/                    v0-v4: the step-by-step build-up to the harness
+```
+
+## Quickstart
+
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv sync
+cp .env.example .env        # then add your API keys (only needed for the gpt / claude models)
+uv run agent-harness-build
+```
+
+The default model is `local`, which expects [Ollama](https://ollama.com) on `localhost:11434` with `qwen3.5:9b` pulled. The `time` and `fetch` servers are launched with `uvx`, so they need network access the first time.
+
+### Commands
+
+| Command | What it does |
+| --- | --- |
+| `/models`, `/model <name>` | List or switch the active model |
+| `/tools` | List every tool from every connected server |
+| `/memory` | Show stored memory (via the `memory://facts` resource) |
+| `/prompts` | List prompts exposed by the servers |
+| `/prompt <server/name> [k=v ...]` | Run a server prompt through the agent, e.g. `/prompt workspace/summarize_file filename=notes.md` |
+| `/quit` | Exit |
+
+## The workspace MCP server
+
+It can be run on its own, for example from an MCP client such as the MCP Inspector or Claude Desktop:
+
+```bash
+uv run workspace-server
+```
+
+| Primitive | Name | Purpose |
+| --- | --- | --- |
+| Tool | `list_files`, `read_file`, `write_file` | Work with the workspace folder. Paths that escape it are rejected. |
+| Tool | `save_memory`, `forget_memory` | Add (deduplicated) or remove remembered facts |
+| Resource | `memory://facts` | All remembered facts |
+| Resource | `workspace://{filename}` | One workspace file |
+| Prompt | `daily_review`, `summarize_file` | Reusable prompt templates |
+
+Set `AGENT_WORKSPACE` and `AGENT_MEMORY_FILE` to change where files and memory live.
+
+## Adding another MCP server
+
+Add an entry to `src/agent_harness_build/mcp_servers.json`:
+
+```json
+"my-server": { "command": "uvx", "args": ["my-mcp-server"] }
+```
+
+Its tools appear in `/tools` as `my-server__<tool>`. The special command `{python}` expands to the current interpreter, which is how the bundled workspace server is launched.
+
+## Tests
+
+```bash
+uv run pytest
+```
+
+The suite covers each tool, resource and prompt, path-traversal rejection, memory deduplication, and a real stdio connection from the harness to the workspace server.
+
+## Design notes
+
+- **OpenAI-compatible endpoints everywhere.** Local and cloud models share one client and one message format, so adding a provider is a registry entry.
+- **stdio transport.** Simple, no ports or auth, and the harness controls the server's lifetime. Anything a stdio server prints to stdout would corrupt the protocol, so servers must log to stderr.
+- **Everything is an MCP tool.** The harness has no hard-coded tools, which means the same server can be reused by any other MCP client.
+
+## Roadmap
+
+- Streaming responses and parallel tool calls
+- Approval prompts for write operations
+- Embedding-based memory retrieval
+- Model comparison evals
+- CI (lint and tests)
