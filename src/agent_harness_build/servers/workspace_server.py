@@ -10,6 +10,7 @@ Runs over stdio, so nothing here may print to stdout.
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 from agent_harness_build import paths
 
@@ -34,17 +35,28 @@ def _read_memory() -> str:
 
 # ---------------------------------------------------------------------------
 # Tools
+#
+# Annotations tell clients how risky each tool is, so they can decide what to
+# confirm with the user: read-only tools never need it, destructive ones do.
 # ---------------------------------------------------------------------------
 
+READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+OVERWRITES = ToolAnnotations(
+    read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
+)
+ADDS_ONLY = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+)
 
-@mcp.tool()
+
+@mcp.tool(annotations=READ_ONLY)
 def list_files() -> str:
     """List the files in the user's workspace folder."""
     paths.WORKSPACE.mkdir(parents=True, exist_ok=True)
     return "\n".join(sorted(p.name for p in paths.WORKSPACE.iterdir())) or "(empty)"
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 def read_file(filename: str) -> str:
     """Read one file from the user's workspace folder."""
     path = _safe_path(filename)
@@ -55,7 +67,7 @@ def read_file(filename: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-@mcp.tool()
+@mcp.tool(annotations=OVERWRITES)
 def write_file(filename: str, content: str) -> str:
     """Write (or overwrite) a file in the user's workspace folder."""
     path = _safe_path(filename)
@@ -66,7 +78,7 @@ def write_file(filename: str, content: str) -> str:
     return f"wrote {filename}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ADDS_ONLY)
 def save_memory(fact: str) -> str:
     """Save one short fact about the user to long-term memory.
 
@@ -94,7 +106,7 @@ def save_memory(fact: str) -> str:
     return reply
 
 
-@mcp.tool()
+@mcp.tool(annotations=OVERWRITES)
 def forget_memory(fragment: str) -> str:
     """Remove every remembered fact containing the given text (case-insensitive).
 

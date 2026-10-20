@@ -92,6 +92,7 @@ The default model is `local`, which expects [Ollama](https://ollama.com) on `loc
 | `/memory` | Show stored memory (via the `memory://facts` resource) |
 | `/prompts` | List prompts exposed by the servers |
 | `/prompt <server/name> [k=v ...]` | Run a server prompt through the agent, e.g. `/prompt workspace/summarize_file filename=notes.md` |
+| `/approve [writes\|all\|none]` | Show or change when tool calls need your confirmation |
 | `/quit` | Exit |
 
 ## The workspace MCP server
@@ -124,6 +125,20 @@ uv run python scripts/inspect_server.py
 # 2. MCP Inspector: a browser UI for the tools, resources and prompts (needs Node 22.19+).
 npx @modelcontextprotocol/inspector uv run workspace-server
 ```
+
+## Approval prompts
+
+Before a risky tool call runs, the harness stops and asks:
+
+```
+  [approval needed] workspace__write_file
+      filename: todo.md
+      content: - call dentist
+               - buy milk
+  allow? [y]es / [n]o / [a]lways this session:
+```
+
+What counts as risky comes from the server itself, via the MCP tool annotations (`readOnlyHint`, `destructiveHint`), so it works for any server. The workspace server marks `read_file` and `list_files` read-only, `save_memory` as add-only, and `write_file` and `forget_memory` as destructive. Third-party tools with no annotations are treated as risky, as the spec advises. The default mode, `writes`, asks only for destructive tools, and `/approve all` or `/approve none` changes that. A denied call is not run: the model is told the user said no and to ask what they want instead. The eval runner and the tests approve everything automatically.
 
 ## Evals
 
@@ -188,7 +203,6 @@ The suite needs no model or API key, and CI runs it (plus `ruff`) on every push 
 
 - Harder eval cases and a comparison across cloud models
 - Streaming responses and parallel tool calls
-- Approval prompts for write operations
 - Embedding-based memory retrieval
 
 ## License
