@@ -133,7 +133,13 @@ def print_table(results: list[dict], models: list[str]) -> None:
         passed = sum(stats[m][c][0] for c in tiers)
         total = sum(stats[m][c][1] for c in tiers)
         rows.append(
-            [m, *cells, f"{passed}/{total}", str(errors[m]), f"{sum(seconds[m]) / len(seconds[m]):.1f}"]
+            [
+                m,
+                *cells,
+                f"{passed}/{total}",
+                str(errors[m]),
+                f"{sum(seconds[m]) / len(seconds[m]):.1f}" if seconds[m] else "-",
+            ]
         )
     widths = [max(len(row[i]) for row in [header, *rows]) for i in range(len(header))]
     for row in [header, ["-" * w for w in widths], *rows]:
