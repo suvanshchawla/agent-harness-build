@@ -140,6 +140,18 @@ Before a risky tool call runs, the harness stops and asks:
 
 What counts as risky comes from the server itself, via the MCP tool annotations (`readOnlyHint`, `destructiveHint`), so it works for any server. The workspace server marks `read_file` and `list_files` read-only, `save_memory` as add-only, and `write_file` and `forget_memory` as destructive. Third-party tools with no annotations are treated as risky, as the spec advises. The default mode, `writes`, asks only for destructive tools, and `/approve all` or `/approve none` changes that. A denied call is not run: the model is told the user said no and to ask what they want instead. The eval runner and the tests approve everything automatically.
 
+## Parallel tool calls
+
+Models often ask for several tools in one message ("read a.md, b.md and c.md"). The harness runs neighbouring **read-only** calls at the same time and everything else one at a time, in the order the model asked:
+
+```
+read  read  write  read    ->  [read read]  [write]  [read]
+```
+
+Read-only is decided from the server's own `readOnlyHint` annotation, the same one the approval prompts use. A write is never reordered or overlapped with the calls around it, so a model that asks to write a file and then read it back still sees the new contents. Results go back to the model in call order, however the calls finish. Approval questions are asked one at a time before a batch starts, and a call that crashes becomes an error result for that call only, so its siblings still complete. `run_agent(..., parallel=False)` restores strictly sequential execution.
+
+The speedup only shows with slow tools such as `fetch`: the local workspace tools return in milliseconds. The tests use a small slow MCP server that logs when each call starts and ends, and check overlap from that log instead of from timing.
+
 ## Evals
 
 Unit tests can't tell you whether a *model* picks the right tool, so there is a small eval suite. Each case in `src/agent_harness_build/evals/cases.json` is a prompt plus expectations: which tools should (or should not) be called with which arguments, what the answer should contain, and what the workspace files and memory should look like afterwards.
@@ -202,7 +214,7 @@ The suite needs no model or API key, and CI runs it (plus `ruff`) on every push 
 ## Roadmap
 
 - Harder eval cases and a comparison across cloud models
-- Streaming responses and parallel tool calls
+- Streaming responses
 - Embedding-based memory retrieval
 
 ## License

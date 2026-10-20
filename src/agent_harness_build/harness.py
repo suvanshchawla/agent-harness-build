@@ -194,6 +194,58 @@ DENIED = (
 MAX_STEPS = 10  # model round-trips per user message before we give up
 
 
+def is_read_only(name: str) -> bool:
+    ann = tool_annotations.get(name)
+    return bool(ann and ann.read_only_hint)
+
+
+async def _run_one(name: str, args: dict) -> str:
+    """Run one tool call; a crash becomes an error result so one bad call can't sink its siblings."""
+    try:
+        return await call_tool(name, args)
+    except Exception as e:
+        return f"error: tool call failed: {type(e).__name__}: {e}"
+
+
+async def execute_tool_calls(
+    calls: list[tuple[str, dict]],
+    approve: Approver | None = None,
+    parallel: bool = True,
+    verbose: bool = True,
+) -> list[tuple[str, bool]]:
+    """Run the tool calls from one model message and return (result, denied) in the same order.
+
+    Neighbouring read-only calls run concurrently, since they can't affect each other. Any
+    other call runs alone, in order, so a write is never reordered relative to the calls
+    around it. Approval questions are asked one at a time, in order, before a batch runs.
+    """
+    batches: list[list[int]] = []
+    for i, (name, _) in enumerate(calls):
+        joins_previous = (
+            parallel and batches and is_read_only(name) and is_read_only(calls[batches[-1][-1]][0])
+        )
+        if joins_previous:
+            batches[-1].append(i)
+        else:
+            batches.append([i])
+
+    out: list[tuple[str, bool]] = [("", False)] * len(calls)
+    for batch in batches:
+        runnable = []
+        for i in batch:
+            name, args = calls[i]
+            if approve is not None and needs_approval(name) and not await approve(name, args):
+                out[i] = (DENIED, True)
+            else:
+                runnable.append(i)
+        if verbose and len(runnable) > 1:
+            print(f"  [parallel] running {len(runnable)} calls at once")
+        results = await asyncio.gather(*(_run_one(*calls[i]) for i in runnable))
+        for i, result in zip(runnable, results, strict=True):
+            out[i] = (result, False)
+    return out
+
+
 async def run_agent(
     user_message: str,
     history: list | None = None,
@@ -202,6 +254,7 @@ async def run_agent(
     verbose: bool = True,
     client: AsyncOpenAI | None = None,
     approve: Approver | None = None,
+    parallel: bool = True,
 ) -> str:
     """Run one user turn to completion.
 
@@ -212,6 +265,8 @@ async def run_agent(
 
     approve is asked before any call that needs_approval() flags. Leaving it as None
     approves everything, which is what the eval runner and tests want.
+
+    parallel=False runs every tool call one after another, as before.
     """
     history = messages if history is None else history
     cfg = MODELS[model or model_name]
@@ -226,18 +281,15 @@ async def run_agent(
             return message.content or ""
 
         history.append(message)
-        for call in message.tool_calls:
-            args = json.loads(call.function.arguments or "{}")
-            if verbose:
-                print(f"  [tool] {call.function.name}({args})")
-            denied = (
-                approve is not None
-                and needs_approval(call.function.name)
-                and not await approve(call.function.name, args)
-            )
-            result = DENIED if denied else await call_tool(call.function.name, args)
+        calls = [(c.function.name, json.loads(c.function.arguments or "{}")) for c in message.tool_calls]
+        if verbose:
+            for name, args in calls:
+                print(f"  [tool] {name}({args})")
+        outcomes = await execute_tool_calls(calls, approve, parallel, verbose)
+
+        for call, (name, args), (result, denied) in zip(message.tool_calls, calls, outcomes, strict=True):
             if trace is not None:
-                entry = {"tool": call.function.name, "args": args, "result": result}
+                entry = {"tool": name, "args": args, "result": result}
                 trace.append({**entry, "denied": True} if denied else entry)
             history.append({"role": "tool", "tool_call_id": call.id, "content": result})
     return f"(stopped after {MAX_STEPS} steps without a final answer)"
