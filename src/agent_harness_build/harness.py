@@ -5,6 +5,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
 from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
@@ -192,6 +193,10 @@ DENIED = (
 # ---------------------------------------------------------------------------
 
 MAX_STEPS = 10  # model round-trips per user message before we give up
+EMPTY_RETRIES = 1  # extra attempts when the model sends neither text nor tool calls
+
+
+EMPTY_NOTICE = "(the model returned an empty response)"
 
 
 def is_read_only(name: str) -> bool:
@@ -246,6 +251,61 @@ async def execute_tool_calls(
     return out
 
 
+async def stream_completion(
+    client: AsyncOpenAI, model: str, history: list, on_text: Callable[[str], None] | None = None
+) -> SimpleNamespace:
+    """Make one streamed model call and assemble the chunks into a single message.
+
+    Text deltas go to on_text as they arrive. Tool calls arrive in fragments (the name once,
+    the JSON arguments spread over many chunks, keyed by index), so they are stitched back
+    together here. The result has the same .content / .tool_calls shape as a non-streamed
+    message, so the loop after this call doesn't care which way it was made.
+    """
+    stream = await client.chat.completions.create(
+        model=model, messages=history, tools=TOOL_SCHEMAS, stream=True
+    )
+    text: list[str] = []
+    thinking: list[str] = []
+    parts: dict[int, dict] = {}  # tool call index -> {"id", "name", "arguments"}
+    async for chunk in stream:
+        if not chunk.choices:  # some providers end with a usage-only chunk
+            continue
+        delta = chunk.choices[0].delta
+        thinking.append(getattr(delta, "reasoning", None) or "")
+        if delta.content:
+            text.append(delta.content)
+            if on_text:
+                on_text(delta.content)
+        for frag in delta.tool_calls or []:
+            part = parts.setdefault(frag.index, {"id": "", "name": "", "arguments": ""})
+            part["id"] = frag.id or part["id"]
+            if frag.function:
+                part["name"] += frag.function.name or ""
+                part["arguments"] += frag.function.arguments or ""
+
+    calls = [
+        SimpleNamespace(id=p["id"], function=SimpleNamespace(name=p["name"], arguments=p["arguments"]))
+        for _, p in sorted(parts.items())
+    ]
+    return SimpleNamespace(content="".join(text), tool_calls=calls or None, reasoning="".join(thinking))
+
+
+def as_history_entry(message) -> dict:
+    """The assistant message in the plain-dict form that goes back into the conversation."""
+    return {
+        "role": "assistant",
+        "content": message.content,
+        "tool_calls": [
+            {
+                "id": c.id,
+                "type": "function",
+                "function": {"name": c.function.name, "arguments": c.function.arguments},
+            }
+            for c in message.tool_calls
+        ],
+    }
+
+
 async def run_agent(
     user_message: str,
     history: list | None = None,
@@ -255,6 +315,7 @@ async def run_agent(
     client: AsyncOpenAI | None = None,
     approve: Approver | None = None,
     parallel: bool = True,
+    on_text: Callable[[str], None] | None = None,
 ) -> str:
     """Run one user turn to completion.
 
@@ -267,6 +328,9 @@ async def run_agent(
     approves everything, which is what the eval runner and tests want.
 
     parallel=False runs every tool call one after another, as before.
+
+    on_text switches on streaming: the model call is streamed and each piece of text is
+    passed to on_text as it arrives. The return value is still the full final answer.
     """
     history = messages if history is None else history
     cfg = MODELS[model or model_name]
@@ -274,13 +338,30 @@ async def run_agent(
 
     history.append({"role": "user", "content": user_message})
     for _ in range(MAX_STEPS):
-        response = await client.chat.completions.create(model=cfg.model, messages=history, tools=TOOL_SCHEMAS)
-        message = response.choices[0].message
+        for attempt in range(EMPTY_RETRIES + 1):
+            if on_text:
+                message = await stream_completion(client, cfg.model, history, on_text)
+            else:
+                response = await client.chat.completions.create(
+                    model=cfg.model, messages=history, tools=TOOL_SCHEMAS
+                )
+                message = response.choices[0].message
+            if message.tool_calls or (message.content or "").strip():
+                break
+            if verbose and attempt < EMPTY_RETRIES:
+                print("  [empty reply] asking the model again")
         if not message.tool_calls:
-            history.append({"role": "assistant", "content": message.content})
-            return message.content or ""
+            answer = message.content or ""
+            if not answer.strip():
+                # Thinking models sometimes write the whole answer into their reasoning and
+                # send no reply. That text is the best answer we have; failing that, say so.
+                answer = (getattr(message, "reasoning", None) or "").strip() or EMPTY_NOTICE
+                if on_text:
+                    on_text(answer)
+            history.append({"role": "assistant", "content": answer})
+            return answer
 
-        history.append(message)
+        history.append(as_history_entry(message) if on_text else message)
         calls = [(c.function.name, json.loads(c.function.arguments or "{}")) for c in message.tool_calls]
         if verbose:
             for name, args in calls:
@@ -298,6 +379,13 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 # Slash commands
 # ---------------------------------------------------------------------------
+
+
+async def chat(text: str) -> None:
+    """One interactive turn: the answer prints as it streams in."""
+    print("\nassistant: ", end="", flush=True)
+    await run_agent(text, approve=ask_user, on_text=lambda t: print(t, end="", flush=True))
+    print("\n")
 
 
 async def handle_command(line: str) -> bool:
@@ -340,7 +428,7 @@ async def handle_command(line: str) -> bool:
             session, name = prompt_routes[key]
             result = await session.get_prompt(name, dict(p.split("=", 1) for p in pairs))
             text = "\n".join(m.content.text for m in result.messages if hasattr(m.content, "text"))
-            print("\nassistant:", await run_agent(text, approve=ask_user), "\n")
+            await chat(text)
     elif cmd == "/quit":
         raise SystemExit
     else:
@@ -368,7 +456,7 @@ async def main():
                 line = (await asyncio.to_thread(input, "you: ")).strip()
                 if not line or await handle_command(line):
                     continue
-                print("\nassistant:", await run_agent(line, approve=ask_user), "\n")
+                await chat(line)
         except (EOFError, KeyboardInterrupt, SystemExit):
             print("\nbye!")
 

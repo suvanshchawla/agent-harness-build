@@ -106,3 +106,98 @@ async def test_history_accumulates_across_turns(connected_harness):
         await harness.run_agent("second", history=history, client=fake, verbose=False)
     assert [m["content"] for m in history] == ["sys", "first", "one", "second", "two"]
     assert len(fake.requests[1]) == 4  # system + first + one + second
+
+
+async def test_streamed_answer_arrives_in_pieces_and_matches_the_full_text(connected_harness):
+    fake = FakeClient(reply("Hello there, friend!"))
+    pieces: list[str] = []
+    history: list = []
+    async with connected_harness():
+        answer = await harness.run_agent(
+            "hi", history=history, client=fake, verbose=False, on_text=pieces.append
+        )
+    assert answer == "Hello there, friend!"
+    assert len(pieces) > 1
+    assert "".join(pieces) == answer
+    assert history[-1] == {"role": "assistant", "content": "Hello there, friend!"}
+
+
+async def test_streamed_tool_call_fragments_are_reassembled(connected_harness):
+    fake = FakeClient(
+        reply(
+            tool_calls=[
+                tool_call("workspace__write_file", {"filename": "a.txt", "content": "one"}, "c1"),
+                tool_call("workspace__write_file", {"filename": "b.txt", "content": "two"}, "c2"),
+            ]
+        ),
+        reply("Done."),
+    )
+    trace: list = []
+    history: list = []
+    async with connected_harness() as (workspace, _):
+        answer = await harness.run_agent(
+            "write", history=history, trace=trace, client=fake, verbose=False, on_text=lambda _: None
+        )
+        assert (workspace / "a.txt").read_text() == "one"
+        assert (workspace / "b.txt").read_text() == "two"
+    assert answer == "Done."
+    assert [t["args"]["filename"] for t in trace] == ["a.txt", "b.txt"]
+    assistant = history[1]
+    assert [c["id"] for c in assistant["tool_calls"]] == ["c1", "c2"]
+    assert [m["tool_call_id"] for m in history if m["role"] == "tool"] == ["c1", "c2"]
+
+
+async def test_empty_reply_never_puts_null_content_in_the_history(connected_harness):
+    # Ollama rejects `content: null` on the next request, which crashed the session
+    fake = FakeClient(reply(""))
+    history: list = []
+    async with connected_harness():
+        await harness.run_agent("hi", history=history, client=fake, verbose=False, on_text=lambda _: None)
+        await harness.run_agent("again", history=history, client=fake, verbose=False, on_text=lambda _: None)
+    assert history[1] == {"role": "assistant", "content": harness.EMPTY_NOTICE}
+    assert all(m.get("content") is not None for m in fake.requests[-1])
+
+
+async def test_empty_reply_is_retried(connected_harness):
+    fake = FakeClient(reply(""), reply("Here you go."))
+    history: list = []
+    async with connected_harness():
+        answer = await harness.run_agent(
+            "hi", history=history, client=fake, verbose=False, on_text=lambda _: None
+        )
+    assert answer == "Here you go."
+    assert len(fake.requests) == 2
+    assert fake.requests[1] == fake.requests[0]  # same conversation, nothing added for the retry
+    assert history[-1] == {"role": "assistant", "content": "Here you go."}
+
+
+async def test_still_empty_after_retry_falls_back_to_the_reasoning(connected_harness):
+    fake = FakeClient(reply("", reasoning="The repo is a Flask API."))  # repeats forever
+    pieces: list[str] = []
+    history: list = []
+    async with connected_harness():
+        answer = await harness.run_agent(
+            "hi", history=history, client=fake, verbose=False, on_text=pieces.append
+        )
+    assert answer == "The repo is a Flask API."
+    assert "".join(pieces) == answer  # the user sees it, not just the return value
+    assert len(fake.requests) == harness.EMPTY_RETRIES + 1
+    assert history[-1]["content"] == answer
+
+
+async def test_empty_with_no_reasoning_says_so_instead_of_returning_nothing(connected_harness):
+    fake = FakeClient(reply(""))
+    async with connected_harness():
+        streamed = await harness.run_agent(
+            "hi", history=[], client=fake, verbose=False, on_text=lambda _: None
+        )
+        plain = await harness.run_agent("hi", history=[], client=FakeClient(reply(None)), verbose=False)
+    assert streamed == plain == harness.EMPTY_NOTICE
+
+
+async def test_a_tool_call_with_no_text_is_not_treated_as_empty(connected_harness):
+    fake = FakeClient(reply(tool_calls=[tool_call("workspace__list_files", {})]), reply("ok"))
+    async with connected_harness():
+        answer = await harness.run_agent("ls", history=[], client=fake, verbose=False, on_text=lambda _: None)
+    assert answer == "ok"
+    assert len(fake.requests) == 2  # no retry burned on the tool-call step

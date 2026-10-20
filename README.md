@@ -140,6 +140,12 @@ Before a risky tool call runs, the harness stops and asks:
 
 What counts as risky comes from the server itself, via the MCP tool annotations (`readOnlyHint`, `destructiveHint`), so it works for any server. The workspace server marks `read_file` and `list_files` read-only, `save_memory` as add-only, and `write_file` and `forget_memory` as destructive. Third-party tools with no annotations are treated as risky, as the spec advises. The default mode, `writes`, asks only for destructive tools, and `/approve all` or `/approve none` changes that. A denied call is not run: the model is told the user said no and to ask what they want instead. The eval runner and the tests approve everything automatically.
 
+## Streaming
+
+In the interactive loop the reply prints as the model writes it, instead of appearing all at once. `run_agent(..., on_text=callback)` turns this on: the model call is streamed and each piece of text goes to the callback as it arrives, while the return value is still the full answer. Without `on_text` (the eval runner, tests) nothing changes.
+
+Tool calls arrive in fragments, with the name once and the JSON arguments spread over many chunks, so `stream_completion` stitches them back together by index and only then do the tools run. The loop after that sees the same message shape either way. The test fake replays scripted replies as small chunks, including split-up tool calls, so this is covered without a model.
+
 ## Parallel tool calls
 
 Models often ask for several tools in one message ("read a.md, b.md and c.md"). The harness runs neighbouring **read-only** calls at the same time and everything else one at a time, in the order the model asked:
@@ -214,7 +220,6 @@ The suite needs no model or API key, and CI runs it (plus `ruff`) on every push 
 ## Roadmap
 
 - Harder eval cases and a comparison across cloud models
-- Streaming responses
 - Embedding-based memory retrieval
 
 ## License
