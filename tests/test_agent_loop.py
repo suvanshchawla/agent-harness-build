@@ -279,3 +279,37 @@ async def test_chat_reports_a_failed_turn_and_keeps_the_session_alive(monkeypatc
     out = capsys.readouterr().out
     assert "RuntimeError: 400: invalid message content type" in out
     assert "dropped" in out
+
+
+def test_short_results_pass_through_untouched():
+    assert harness.truncate_result("hello", limit=10) == "hello"
+    assert harness.truncate_result("x" * 10, limit=10) == "x" * 10  # exactly at the limit
+
+
+def test_long_results_are_cut_and_say_how_much_is_missing():
+    cut = harness.truncate_result("a" * 1000 + "b" * 2345, limit=1000)
+    assert cut.startswith("a" * 1000)
+    assert "b" not in cut.split("[truncated")[0]
+    assert "[truncated: 2,345 more characters not shown" in cut
+
+
+async def test_the_model_only_sees_the_truncated_result(connected_harness, monkeypatch):
+    monkeypatch.setattr(harness, "MAX_TOOL_CHARS", 100)
+    fake = FakeClient(
+        reply(tool_calls=[tool_call("workspace__read_file", {"filename": "big.txt"})]), reply("ok")
+    )
+    trace: list = []
+    async with connected_harness() as (workspace, _):
+        workspace.mkdir(exist_ok=True)
+        (workspace / "big.txt").write_text("z" * 5000)
+        await harness.run_agent("read it", history=[], trace=trace, client=fake, verbose=False)
+    sent = [m for m in fake.requests[1] if isinstance(m, dict) and m["role"] == "tool"][0]["content"]
+    assert sent == trace[0]["result"]  # the trace records what the model actually saw
+    assert sent.startswith("z" * 100) and "[truncated: 4,900 more characters" in sent
+    assert len(sent) < 300
+
+
+async def test_short_error_results_are_not_mangled(connected_harness):
+    async with connected_harness():
+        result = await harness.call_tool("nope__missing", {})
+    assert result == "error: unknown tool nope__missing"

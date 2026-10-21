@@ -129,13 +129,27 @@ async def read_memory() -> str:
     return "(memory unavailable)"
 
 
+MAX_TOOL_CHARS = 8000  # longest tool result the model sees; one big page can fill a small context window
+
+
+def truncate_result(text: str, limit: int | None = None) -> str:
+    """Cut an over-long tool result and say how much was dropped, so the model knows it is partial."""
+    limit = MAX_TOOL_CHARS if limit is None else limit
+    if len(text) <= limit:
+        return text
+    return (
+        f"{text[:limit]}\n\n[truncated: {len(text) - limit:,} more characters not shown. "
+        "If you need the rest, ask the tool for a smaller part, or from an offset if it supports one.]"
+    )
+
+
 async def call_tool(name: str, args: dict) -> str:
     if name not in tool_routes:
         return f"error: unknown tool {name}"
     session, real_name = tool_routes[name]
     result = await session.call_tool(real_name, args)
     text = "\n".join(c.text for c in result.content if hasattr(c, "text"))
-    return f"error: {text}" if result.is_error else text
+    return truncate_result(f"error: {text}" if result.is_error else text)
 
 
 # ---------------------------------------------------------------------------
