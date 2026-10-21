@@ -150,6 +150,14 @@ Tool calls arrive in fragments, with the name once and the JSON arguments spread
 
 A tool result longer than `MAX_TOOL_CHARS` (8,000 characters) is cut before the model sees it, with a marker saying how many characters were dropped. This keeps one big file from filling a small local context window. The trace and eval results record the truncated text, i.e. what the model actually saw. The `fetch` server already pages its own output at 5,000 characters, so this mainly protects against other tools, such as reading a large workspace file.
 
+## Cancelling a turn
+
+Ctrl+C while the assistant is working cancels that turn and returns to the `you:` prompt; Ctrl+C at the prompt still quits.
+
+- **Nothing had run yet** (still thinking or writing): the turn is removed from the conversation as if it never happened.
+- **Tools are running:** calls already started are allowed to finish, so a file write is never abandoned halfway. Calls that had not started are skipped and reported as not run, the model's history keeps what did happen, and the turn ends with a `(cancelled by the user)` note. If an approval question is open, cancelling means the call will not run, whatever you answer.
+- **Ctrl+C a second time** stops waiting for a slow tool and aborts right away.
+
 ## Parallel tool calls
 
 Models often ask for several tools in one message ("read a.md, b.md and c.md"). The harness runs neighbouring **read-only** calls at the same time and everything else one at a time, in the order the model asked:

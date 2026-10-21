@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import signal
 import sys
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
@@ -196,6 +197,9 @@ async def ask_user(name: str, args: dict) -> bool:
     return answer in ("y", "yes")
 
 
+SKIPPED = "error: the user cancelled before this ran, so it was NOT performed."
+CANCEL_NOTE = "(cancelled by the user)"
+
 DENIED = (
     "error: the user denied this action, so it was NOT performed. "
     "Do not retry it. Tell the user it was not done and ask what they would like instead."
@@ -249,12 +253,16 @@ async def execute_tool_calls(
     approve: Approver | None = None,
     parallel: bool = True,
     verbose: bool = True,
+    stop: asyncio.Event | None = None,
 ) -> list[tuple[str, bool]]:
     """Run the tool calls from one model message and return (result, denied) in the same order.
 
     Neighbouring read-only calls run concurrently, since they can't affect each other. Any
     other call runs alone, in order, so a write is never reordered relative to the calls
     around it. Approval questions are asked one at a time, in order, before a batch runs.
+
+    Once stop is set, calls already running finish, and any batch that has not started is
+    skipped and reported as not run, so nothing is ever abandoned halfway.
     """
     batches: list[list[int]] = []
     for i, (name, _) in enumerate(calls):
@@ -268,6 +276,10 @@ async def execute_tool_calls(
 
     out: list[tuple[str, bool]] = [("", False)] * len(calls)
     for batch in batches:
+        if stop is not None and stop.is_set():
+            for i in batch:
+                out[i] = (SKIPPED, False)
+            continue
         runnable = []
         for i in batch:
             name, args = calls[i]
@@ -275,6 +287,10 @@ async def execute_tool_calls(
                 out[i] = (DENIED, True)
             else:
                 runnable.append(i)
+        if stop is not None and stop.is_set():  # cancelled while a question was open
+            for i in runnable:
+                out[i] = (SKIPPED, False)
+            continue
         if verbose and len(runnable) > 1:
             print(f"  [parallel] running {len(runnable)} calls at once")
         results = await asyncio.gather(*(_run_one(*calls[i]) for i in runnable))
@@ -336,6 +352,33 @@ def as_history_entry(message) -> dict:
             for c in message.tool_calls
         ],
     }
+
+
+async def run_tools_to_completion(
+    calls: list[tuple[str, dict]], approve: Approver | None, parallel: bool, verbose: bool
+) -> tuple[list[tuple[str, bool]], bool]:
+    """Run tool calls, but don't let a cancel abandon them. Returns (outcomes, was_cancelled).
+
+    The first cancel lets the calls already running finish and skips the rest; a second cancel
+    stops waiting and marks everything unfinished as cancelled. Either way every call gets a
+    result, so the history stays valid.
+    """
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(execute_tool_calls(calls, approve, parallel, verbose, stop))
+    cancelled = False
+    while True:
+        try:
+            return await asyncio.shield(task), cancelled
+        except asyncio.CancelledError:
+            if task.done() and not task.cancelled():
+                return task.result(), True
+            if cancelled:  # second cancel: stop waiting
+                task.cancel()
+                return [(SKIPPED, False)] * len(calls), True
+            cancelled = True
+            stop.set()
+            if verbose:
+                print("\n  [cancelling] letting running tool calls finish; Ctrl+C again to abort now")
 
 
 async def run_agent(
@@ -401,7 +444,8 @@ async def run_agent(
                 for name, args, _ in calls:
                     print(f"  [tool] {name}({args})")
             valid = [(name, args) for name, args, bad in calls if bad is None]
-            ran = iter(await execute_tool_calls(valid, approve, parallel, verbose))
+            ran_outcomes, cancelled = await run_tools_to_completion(valid, approve, parallel, verbose)
+            ran = iter(ran_outcomes)
             outcomes = [(next(ran) if bad is None else (bad, False)) for _, _, bad in calls]
 
             for call, (name, args, _), (result, denied) in zip(
@@ -411,7 +455,17 @@ async def run_agent(
                     entry = {"tool": name, "args": args, "result": result}
                     trace.append({**entry, "denied": True} if denied else entry)
                 history.append({"role": "tool", "tool_call_id": call.id, "content": result})
+            if cancelled:
+                raise asyncio.CancelledError
         return f"(stopped after {MAX_STEPS} steps without a final answer)"
+    except asyncio.CancelledError:
+        # Tools that already ran changed things, so the model must still know about them: keep
+        # the turn and close it with a note. If nothing ran, the turn simply never happened.
+        if any(isinstance(m, dict) and m.get("role") == "tool" for m in history[start:]):
+            history.append({"role": "assistant", "content": CANCEL_NOTE})
+        else:
+            del history[start:]
+        raise
     except BaseException:
         # a failed or cancelled turn must not leave half a conversation behind
         del history[start:]
@@ -426,11 +480,28 @@ async def run_agent(
 async def chat(text: str) -> None:
     """One interactive turn: the answer prints as it streams in."""
     print("\nassistant: ", end="", flush=True)
+    turn = asyncio.ensure_future(
+        run_agent(text, approve=ask_user, on_text=lambda t: print(t, end="", flush=True))
+    )
+    loop = asyncio.get_running_loop()
     try:
-        await run_agent(text, approve=ask_user, on_text=lambda t: print(t, end="", flush=True))
+        loop.add_signal_handler(signal.SIGINT, turn.cancel)  # Ctrl+C cancels this turn, not the program
+    except NotImplementedError:  # e.g. Windows: Ctrl+C keeps its default behaviour
+        pass
+    try:
+        await turn
+    except asyncio.CancelledError:
+        if not turn.cancelled():
+            raise
+        print("\n  [cancelled]")
     except Exception as e:
         print(f"\n  [error] {type(e).__name__}: {e}")
         print("  that message was dropped from the conversation; try again")
+    finally:
+        try:
+            loop.remove_signal_handler(signal.SIGINT)
+        except NotImplementedError:
+            pass
     print("\n")
 
 

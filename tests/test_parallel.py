@@ -4,61 +4,16 @@ The slow test server logs when each call starts and ends, so overlap is checked 
 not from wall-clock timing.
 """
 
-import json
-from contextlib import AsyncExitStack, asynccontextmanager
-from pathlib import Path
-
 import pytest
 from fakes import FakeClient, reply, tool_call
 
 from agent_harness_build import harness
-
-SLOW_SERVER = Path(__file__).parent / "slow_server.py"
 
 
 @pytest.fixture(autouse=True)
 def reset_state(monkeypatch):
     monkeypatch.setattr(harness, "approval_mode", "writes")
     monkeypatch.setattr(harness, "always_allowed", set())
-
-
-@pytest.fixture
-def slow_harness(tmp_path):
-    """Factory for a context manager that connects the harness to the slow server; yields a reader
-    for the call log: label -> (start, end)."""
-    log = tmp_path / "calls.log"
-    config = tmp_path / "servers.json"
-    config.write_text(
-        json.dumps(
-            {
-                "mcpServers": {
-                    "slow": {
-                        "command": "{python}",
-                        "args": [str(SLOW_SERVER)],
-                        "env": {"AGENT_LOG": str(log)},
-                    }
-                }
-            }
-        )
-    )
-
-    def intervals() -> dict[str, tuple[float, float]]:
-        starts, ends = {}, {}
-        for line in log.read_text().splitlines():
-            event, _tool, label, stamp = line.split()
-            (starts if event == "start" else ends)[label] = float(stamp)
-        return {label: (starts[label], ends[label]) for label in starts}
-
-    @asynccontextmanager
-    async def connect():
-        for registry in (harness.TOOL_SCHEMAS, harness.tool_routes, harness.prompt_routes, harness.sessions):
-            registry.clear()
-        harness.tool_annotations.clear()
-        async with AsyncExitStack() as stack:
-            await harness.connect_mcp(stack, config)
-            yield intervals
-
-    return connect
 
 
 def calls(*specs):
