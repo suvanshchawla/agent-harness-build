@@ -5,6 +5,7 @@ around the model for real: the tool-calling loop, routing to a real MCP server, 
 the step cap and error handling.
 """
 
+import pytest
 from fakes import FakeClient, reply, tool_call
 
 from agent_harness_build import harness
@@ -144,7 +145,8 @@ async def test_streamed_tool_call_fragments_are_reassembled(connected_harness):
     assert [t["args"]["filename"] for t in trace] == ["a.txt", "b.txt"]
     assistant = history[1]
     assert [c["id"] for c in assistant["tool_calls"]] == ["c1", "c2"]
-    assert [m["tool_call_id"] for m in history if m["role"] == "tool"] == ["c1", "c2"]
+    tool_msgs = [m for m in history if isinstance(m, dict) and m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["c1", "c2"]
 
 
 async def test_empty_reply_never_puts_null_content_in_the_history(connected_harness):
@@ -201,3 +203,79 @@ async def test_a_tool_call_with_no_text_is_not_treated_as_empty(connected_harnes
         answer = await harness.run_agent("ls", history=[], client=fake, verbose=False, on_text=lambda _: None)
     assert answer == "ok"
     assert len(fake.requests) == 2  # no retry burned on the tool-call step
+
+
+async def test_a_failed_model_call_rolls_the_turn_back_and_the_session_carries_on(connected_harness):
+    fake = FakeClient(reply("one"), RuntimeError("400: bad request"), reply("three"))
+    history: list = [{"role": "system", "content": "sys"}]
+    async with connected_harness():
+        await harness.run_agent("first", history=history, client=fake, verbose=False)
+        before = list(history)
+        with pytest.raises(RuntimeError, match="400"):
+            await harness.run_agent("second", history=history, client=fake, verbose=False)
+        assert history == before  # the failed message is gone, the earlier turn is intact
+        await harness.run_agent("third", history=history, client=fake, verbose=False)
+    assert [m["content"] for m in history] == ["sys", "first", "one", "third", "three"]
+
+
+async def test_a_failure_after_tools_ran_removes_the_whole_turn(connected_harness):
+    fake = FakeClient(
+        reply(tool_calls=[tool_call("workspace__list_files", {})]), ConnectionError("connection dropped")
+    )
+    history: list = []
+    async with connected_harness():
+        with pytest.raises(ConnectionError):
+            await harness.run_agent("ls", history=history, client=fake, verbose=False)
+    assert history == []  # no orphaned tool call or tool result left behind
+
+
+async def test_a_stream_that_breaks_midway_rolls_back_too(connected_harness):
+    broken = reply("partial answer that never finishes")
+    broken.fail = ConnectionError("stream cut")
+    history: list = []
+    async with connected_harness():
+        with pytest.raises(ConnectionError):
+            await harness.run_agent(
+                "hi", history=history, client=FakeClient(broken), verbose=False, on_text=lambda _: None
+            )
+    assert history == []
+
+
+async def test_malformed_tool_arguments_go_back_to_the_model_as_an_error(connected_harness):
+    bad = tool_call("workspace__write_file", {}, "c1")
+    bad.function.arguments = '{"filename": "a.txt", "content": "unfinished'  # cut off mid-string
+    fake = FakeClient(
+        reply(tool_calls=[bad, tool_call("workspace__list_files", {}, "c2")]),
+        reply("Let me retry."),
+    )
+    trace: list = []
+    history: list = []
+    async with connected_harness() as (workspace, _):
+        answer = await harness.run_agent("write", history=history, trace=trace, client=fake, verbose=False)
+        assert not (workspace / "a.txt").exists()  # nothing half-written
+    assert answer == "Let me retry."
+    assert "not valid JSON" in trace[0]["result"]
+    assert trace[1]["tool"] == "workspace__list_files"  # the sibling call still ran
+    tool_msgs = [m for m in history if isinstance(m, dict) and m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["c1", "c2"]
+
+
+async def test_tool_arguments_that_are_not_an_object_are_rejected(connected_harness):
+    odd = tool_call("workspace__list_files", {}, "c1")
+    odd.function.arguments = "[1, 2]"
+    fake = FakeClient(reply(tool_calls=[odd]), reply("ok"))
+    trace: list = []
+    async with connected_harness():
+        await harness.run_agent("x", history=[], trace=trace, client=fake, verbose=False)
+    assert "must be a JSON object" in trace[0]["result"]
+
+
+async def test_chat_reports_a_failed_turn_and_keeps_the_session_alive(monkeypatch, capsys):
+    async def boom(*_, **__):
+        raise RuntimeError("400: invalid message content type")
+
+    monkeypatch.setattr(harness, "run_agent", boom)
+    await harness.chat("hello")  # must not raise
+    out = capsys.readouterr().out
+    assert "RuntimeError: 400: invalid message content type" in out
+    assert "dropped" in out

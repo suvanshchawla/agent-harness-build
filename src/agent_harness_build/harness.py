@@ -199,6 +199,24 @@ EMPTY_RETRIES = 1  # extra attempts when the model sends neither text nor tool c
 EMPTY_NOTICE = "(the model returned an empty response)"
 
 
+def parse_arguments(raw: str | None) -> tuple[dict | str, str | None]:
+    """Parse a tool call's JSON arguments. Returns (args, None), or (raw, error) if they are unusable.
+
+    Models sometimes send truncated or malformed JSON. The error goes back to the model as the
+    tool result so it can try again, instead of crashing the turn.
+    """
+    try:
+        args = json.loads(raw or "{}")
+    except json.JSONDecodeError as e:
+        return (
+            raw or "",
+            f"error: the arguments were not valid JSON ({e}). Call the tool again with valid JSON.",
+        )
+    if not isinstance(args, dict):
+        return raw or "", "error: the arguments must be a JSON object. Call the tool again with one."
+    return args, None
+
+
 def is_read_only(name: str) -> bool:
     ann = tool_annotations.get(name)
     return bool(ann and ann.read_only_hint)
@@ -336,44 +354,54 @@ async def run_agent(
     cfg = MODELS[model or model_name]
     client = client or AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
 
+    start = len(history)
     history.append({"role": "user", "content": user_message})
-    for _ in range(MAX_STEPS):
-        for attempt in range(EMPTY_RETRIES + 1):
-            if on_text:
-                message = await stream_completion(client, cfg.model, history, on_text)
-            else:
-                response = await client.chat.completions.create(
-                    model=cfg.model, messages=history, tools=TOOL_SCHEMAS
-                )
-                message = response.choices[0].message
-            if message.tool_calls or (message.content or "").strip():
-                break
-            if verbose and attempt < EMPTY_RETRIES:
-                print("  [empty reply] asking the model again")
-        if not message.tool_calls:
-            answer = message.content or ""
-            if not answer.strip():
-                # Thinking models sometimes write the whole answer into their reasoning and
-                # send no reply. That text is the best answer we have; failing that, say so.
-                answer = (getattr(message, "reasoning", None) or "").strip() or EMPTY_NOTICE
+    try:
+        for _ in range(MAX_STEPS):
+            for attempt in range(EMPTY_RETRIES + 1):
                 if on_text:
-                    on_text(answer)
-            history.append({"role": "assistant", "content": answer})
-            return answer
+                    message = await stream_completion(client, cfg.model, history, on_text)
+                else:
+                    response = await client.chat.completions.create(
+                        model=cfg.model, messages=history, tools=TOOL_SCHEMAS
+                    )
+                    message = response.choices[0].message
+                if message.tool_calls or (message.content or "").strip():
+                    break
+                if verbose and attempt < EMPTY_RETRIES:
+                    print("  [empty reply] asking the model again")
+            if not message.tool_calls:
+                answer = message.content or ""
+                if not answer.strip():
+                    # Thinking models sometimes write the whole answer into their reasoning and
+                    # send no reply. That text is the best answer we have; failing that, say so.
+                    answer = (getattr(message, "reasoning", None) or "").strip() or EMPTY_NOTICE
+                    if on_text:
+                        on_text(answer)
+                history.append({"role": "assistant", "content": answer})
+                return answer
 
-        history.append(as_history_entry(message) if on_text else message)
-        calls = [(c.function.name, json.loads(c.function.arguments or "{}")) for c in message.tool_calls]
-        if verbose:
-            for name, args in calls:
-                print(f"  [tool] {name}({args})")
-        outcomes = await execute_tool_calls(calls, approve, parallel, verbose)
+            history.append(as_history_entry(message) if on_text else message)
+            calls = [(c.function.name, *parse_arguments(c.function.arguments)) for c in message.tool_calls]
+            if verbose:
+                for name, args, _ in calls:
+                    print(f"  [tool] {name}({args})")
+            valid = [(name, args) for name, args, bad in calls if bad is None]
+            ran = iter(await execute_tool_calls(valid, approve, parallel, verbose))
+            outcomes = [(next(ran) if bad is None else (bad, False)) for _, _, bad in calls]
 
-        for call, (name, args), (result, denied) in zip(message.tool_calls, calls, outcomes, strict=True):
-            if trace is not None:
-                entry = {"tool": name, "args": args, "result": result}
-                trace.append({**entry, "denied": True} if denied else entry)
-            history.append({"role": "tool", "tool_call_id": call.id, "content": result})
-    return f"(stopped after {MAX_STEPS} steps without a final answer)"
+            for call, (name, args, _), (result, denied) in zip(
+                message.tool_calls, calls, outcomes, strict=True
+            ):
+                if trace is not None:
+                    entry = {"tool": name, "args": args, "result": result}
+                    trace.append({**entry, "denied": True} if denied else entry)
+                history.append({"role": "tool", "tool_call_id": call.id, "content": result})
+        return f"(stopped after {MAX_STEPS} steps without a final answer)"
+    except BaseException:
+        # a failed or cancelled turn must not leave half a conversation behind
+        del history[start:]
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +412,11 @@ async def run_agent(
 async def chat(text: str) -> None:
     """One interactive turn: the answer prints as it streams in."""
     print("\nassistant: ", end="", flush=True)
-    await run_agent(text, approve=ask_user, on_text=lambda t: print(t, end="", flush=True))
+    try:
+        await run_agent(text, approve=ask_user, on_text=lambda t: print(t, end="", flush=True))
+    except Exception as e:
+        print(f"\n  [error] {type(e).__name__}: {e}")
+        print("  that message was dropped from the conversation; try again")
     print("\n")
 
 

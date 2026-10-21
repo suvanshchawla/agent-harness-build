@@ -32,6 +32,8 @@ class FakeClient:
     async def _create(self, model, messages, tools, stream=False):
         self.requests.append(list(messages))
         message = self.script.pop(0) if len(self.script) > 1 else self.script[0]
+        if isinstance(message, Exception):  # a scripted API failure, e.g. a 400
+            raise message
         if stream:
             return self._stream(message)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
@@ -50,4 +52,6 @@ class FakeClient:
             args = call.function.arguments
             for i in range(0, len(args), size):
                 yield chunk(tool_calls=[fragment(index, arguments=args[i : i + size])])
+        if getattr(message, "fail", None):  # the connection drops mid-reply
+            raise message.fail
         yield SimpleNamespace(choices=[])  # a usage-only chunk, as some providers send
