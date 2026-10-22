@@ -259,7 +259,7 @@ The suite needs no model or API key, and CI runs it (plus `ruff`) on every push 
 
 ## Roadmap
 
-- Harder eval cases, since the cloud models now pass everything
+- Eval cases that target harness weaknesses (prompt injection through `fetch`, huge tool results, long contexts) rather than cases meant to separate strong models
 - Embedding-based memory retrieval
 
 ## License
