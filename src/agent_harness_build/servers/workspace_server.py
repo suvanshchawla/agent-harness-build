@@ -83,7 +83,10 @@ def save_memory(fact: str) -> str:
     """Save one short fact about the user to long-term memory.
 
     Use whenever you learn something lasting: their name, preferences,
-    projects, recurring tasks. Duplicates are ignored. If the new fact REPLACES
+    projects, recurring tasks. First check what you already remember: if the
+    user repeats something that is already there, even in different words
+    ("I like tea" when memory says "Likes tea"), do NOT call this tool, just
+    acknowledge it. If the new fact REPLACES
     an older one (moved city, new job, changed email, no longer likes
     something), you must also remove the outdated fact with forget_memory,
     otherwise memory will contradict itself.

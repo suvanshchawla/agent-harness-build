@@ -211,7 +211,9 @@ The evals found two real tool-design problems on the local `qwen3.5:9b`, and bot
 
 The control matters: the nudge did not make the model delete facts it should have kept.
 
-Caveats: this is one small model and 5 trials per case, so treat the numbers as a strong signal on this model and no more. One restraint case got no better (the model re-saves a fact it already knows, which the tool ignores as a duplicate), and it may simply be too strict.
+**3. Re-saving a fact it already knew.** Told "I like tea" while memory already said "Likes tea", the model called `save_memory` anyway (0/5 on `memory-already-known`). The server could not fix this, since its exact-match duplicate check only runs after the call has been made, and "I like tea" is not the same string as "Likes tea". The cause was the tool's own description, which said "Duplicates are ignored" and so told the model that repeating the call was harmless. It now says to check what is already remembered first and not to call the tool for something already there, even in different words. That took the case from 0/5 to 9/10 across two runs, and the other memory cases stayed at 35/35, so the model did not start skipping facts it should save.
+
+Caveats: this is one small model and 5 trials per case, so treat the numbers as a strong signal on this model and no more. `memory-already-known` is still occasionally missed (1 in 10), and the server's duplicate check is still exact-match only, so a reworded duplicate that does get through is stored twice.
 
 ## Adding another MCP server
 
