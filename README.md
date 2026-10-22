@@ -215,6 +215,24 @@ The control matters: the nudge did not make the model delete facts it should hav
 
 Caveats: this is one small model and 5 trials per case, so treat the numbers as a strong signal on this model and no more. `memory-already-known` is still occasionally missed (1 in 10), and the server's duplicate check is still exact-match only, so a reworded duplicate that does get through is stored twice.
 
+### Comparing models
+
+The same suite, 5 trials per case, 29 cases (145 trials per model), run through the same harness against three models:
+
+| Model | Passed | Flaky cases | Avg s | Median s | Slowest s | Prompt tok | Output tok | Cost of the run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `claude-sonnet-5-5` (Anthropic) | 145/145 | 0 | 3.5 | 3.2 | 10.1 | 4,789 | 151 | about $1.61 |
+| `gpt-5.2` (OpenAI) | 145/145 | 0 | 2.9 | 3.1 | 5.6 | 2,283 | 65 | about $0.71 |
+| `qwen3.5:9b` (local Ollama) | 144/145 | 1 | 4.5 | 4.3 | 16.0 | 3,248 | 231 | free |
+
+Token columns are per trial. Costs are in USD, worked out from the recorded token counts and list prices, not read from a bill.
+
+- **The cloud models are at the ceiling.** Both passed every trial, so the suite no longer tells them apart on accuracy. Only speed differs, and the gap is small. Telling them apart would take harder cases.
+- **The local 9B model is close behind.** Its one miss was `memory-additive-keeps-old` (4/5): once it called `forget_memory` on a fact it should have kept. Restraint, safety and multi-step all passed.
+- **Prompt token counts don't compare across providers.** Each provider counts tokens with its own tokenizer, so Claude's higher figure for the same conversations is not evidence that it sends more.
+- **`fetch-title` is skipped in all three runs**, so the `fetch` server is not covered by this comparison. The case fetches `example.com`, and the runner skips it when that host does not resolve. It did not resolve on the network these runs were made from (the ISP's DNS), though it did on a mobile connection. Changing the DNS resolver, or running from another network, makes it run unchanged.
+- **Fixes shaped these numbers.** The `save_memory` description fix (finding 3) and the curly-quote scoring fix both landed before these runs. An earlier local run, before them, scored 138/145.
+
 ## Adding another MCP server
 
 Add an entry to `src/agent_harness_build/mcp_servers.json`:
@@ -241,7 +259,7 @@ The suite needs no model or API key, and CI runs it (plus `ruff`) on every push 
 
 ## Roadmap
 
-- Harder eval cases and a comparison across cloud models
+- Harder eval cases, since the cloud models now pass everything
 - Embedding-based memory retrieval
 
 ## License

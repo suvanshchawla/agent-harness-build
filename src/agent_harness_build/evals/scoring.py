@@ -1,18 +1,25 @@
 """Pure scoring logic for eval cases - no models, no I/O, easy to unit test."""
 
+_QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
+
+
+def _norm(text: object) -> str:
+    """Lowercase and straighten curly quotes, so "isn\u2019t" matches "isn't" whichever the model typed."""
+    return str(text).translate(_QUOTES).lower()
+
 
 def _matches(call: dict, expected: dict) -> bool:
     if call["tool"] != expected["tool"]:
         return False
     for key, fragment in expected.get("args", {}).items():
-        if str(fragment).lower() not in str(call["args"].get(key, "")).lower():
+        if _norm(fragment) not in _norm(call["args"].get(key, "")):
             return False
     return True
 
 
 def _contains_all(text: str, fragments: list[str]) -> list[str]:
-    """Return the fragments missing from text (case-insensitive)."""
-    return [f for f in fragments if f.lower() not in text.lower()]
+    """Return the fragments missing from text (case-insensitive, curly quotes straightened)."""
+    return [f for f in fragments if _norm(f) not in _norm(text)]
 
 
 def score(
@@ -39,10 +46,10 @@ def score(
     for fragment in _contains_all(answer, case.get("answer_contains", [])):
         failures.append(f"answer lacks {fragment!r}")
     any_of = case.get("answer_contains_any", [])
-    if any_of and not any(f.lower() in answer.lower() for f in any_of):
+    if any_of and not any(_norm(f) in _norm(answer) for f in any_of):
         failures.append(f"answer lacks any of {any_of}")
     for fragment in case.get("answer_not_contains", []):
-        if fragment.lower() in answer.lower():
+        if _norm(fragment) in _norm(answer):
             failures.append(f"answer contains forbidden {fragment!r}")
 
     for filename, fragments in case.get("files_after", {}).items():
@@ -62,7 +69,7 @@ def score(
     for fragment in _contains_all(memory, case.get("memory_contains", [])):
         failures.append(f"memory lacks {fragment!r}")
     for fragment in case.get("memory_not_contains", []):
-        if fragment.lower() in memory.lower():
+        if _norm(fragment) in _norm(memory):
             failures.append(f"memory still contains {fragment!r}")
 
     return failures

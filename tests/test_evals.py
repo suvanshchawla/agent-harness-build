@@ -74,3 +74,27 @@ def test_memory_contradiction_is_judged_by_final_state():
     # any route to the right state passes; leaving the old fact behind fails
     failures = score(case, [save], "ok", {}, "- Likes tea\n- Lives in Delhi\n- Lives in Mumbai\n")
     assert failures == ["memory still contains 'Delhi'"]
+
+
+def test_curly_quotes_in_an_answer_match_straight_quotes_in_the_case():
+    # GPT wrote "There isn’t a budget.md" and was marked down for the apostrophe, not the content
+    case = BY_ID["missing-file-honesty"]
+    trace = [call("workspace__read_file", filename="budget.md")]
+    curly = "There isn’t a `budget.md` file in your workspace."
+    assert score(case, trace, curly, {"notes.md": "x"}, "") == []
+
+
+def test_curly_quotes_do_not_hide_a_forbidden_phrase():
+    case = {"id": "x", "category": "c", "prompt": "p", "answer_not_contains": ["don't know"]}
+    assert score(case, [], "I don’t know", {}, "") == ['answer contains forbidden "don\'t know"']
+
+
+def test_curly_quotes_in_memory_and_files_are_straightened_too():
+    case = {
+        "id": "x",
+        "category": "c",
+        "prompt": "p",
+        "memory_contains": ["User's name is Sam"],
+        "files_after": {"a.md": ["it's done"]},
+    }
+    assert score(case, [], "", {"a.md": "it’s done"}, "- User’s name is Sam") == []
