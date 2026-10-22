@@ -85,10 +85,11 @@ async def run_trial(case: dict, model: str, workspace: Path, memory: Path) -> di
         {"role": "system", "content": harness.SYSTEM_PROMPT.format(memory=await harness.read_memory())}
     ]
     trace: list[dict] = []
+    usage: dict = {}
     start = time.perf_counter()
     try:
         answer = await harness.run_agent(
-            case["prompt"], history=history, model=model, trace=trace, verbose=False
+            case["prompt"], history=history, model=model, trace=trace, verbose=False, usage=usage
         )
     except Exception as e:  # network down, bad key, model rejects tools...
         return {
@@ -97,6 +98,7 @@ async def run_trial(case: dict, model: str, workspace: Path, memory: Path) -> di
             "trace": trace,
             "answer": "",
             "seconds": time.perf_counter() - start,
+            **usage,
         }
     seconds = time.perf_counter() - start
 
@@ -108,6 +110,7 @@ async def run_trial(case: dict, model: str, workspace: Path, memory: Path) -> di
         "trace": trace,
         "answer": answer,
         "seconds": seconds,
+        **usage,
     }
 
 
@@ -144,6 +147,84 @@ def print_table(results: list[dict], models: list[str]) -> None:
     widths = [max(len(row[i]) for row in [header, *rows]) for i in range(len(header))]
     for row in [header, ["-" * w for w in widths], *rows]:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
+
+
+def print_cost(results: list[dict], models: list[str]) -> None:
+    """Speed and token use per model, averaged per trial.
+
+    Token columns average only over trials where the provider reported a count, and show "-" if
+    none did (e.g. an endpoint that sends no usage), rather than a made-up zero.
+    """
+
+    def mean(values: list[float], fmt: str) -> str:
+        return format(sum(values) / len(values), fmt) if values else "-"
+
+    header = ["model", "trials", "avg s", "median s", "max s", "model calls", "prompt tok", "output tok"]
+    rows = []
+    for m in models:
+        trials = [r for r in results if r["model"] == m]
+        if not trials:
+            continue
+        secs = sorted(r["seconds"] for r in trials)
+        middle = len(secs) // 2
+        median = secs[middle] if len(secs) % 2 else (secs[middle - 1] + secs[middle]) / 2
+        rows.append(
+            [
+                m,
+                str(len(trials)),
+                f"{sum(secs) / len(secs):.1f}",
+                f"{median:.1f}",
+                f"{secs[-1]:.1f}",
+                mean([r["model_calls"] for r in trials if "model_calls" in r], ".1f"),
+                mean([r["prompt_tokens"] for r in trials if "prompt_tokens" in r], ".0f"),
+                mean([r["completion_tokens"] for r in trials if "completion_tokens" in r], ".0f"),
+            ]
+        )
+    if not rows:
+        return
+    widths = [max(len(row[i]) for row in [header, *rows]) for i in range(len(header))]
+    print()
+    for row in [header, ["-" * w for w in widths], *rows]:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
+
+
+def first_reason(trials: list[dict]) -> str:
+    """Why the first non-passing trial failed, shortened for one line."""
+    for r in trials:
+        if r["status"] != "pass":
+            return "; ".join(r.get("failures") or [r["status"]])[:110]
+    return ""
+
+
+def print_reliability(results: list[dict], models: list[str]) -> None:
+    """With repeated trials, say which cases are stable and which are flaky.
+
+    The table pools every trial, so a case that passes 2 times in 3 looks the same as three
+    different cases each passing once. A flaky case is one with both passes and non-passes
+    (a crash counts as a non-pass).
+    """
+    by_case: dict = defaultdict(lambda: defaultdict(list))  # model -> case -> trials
+    for r in results:
+        by_case[r["model"]][r["case"]].append(r)
+    if not any(len(trials) > 1 for cases in by_case.values() for trials in cases.values()):
+        return
+
+    for model in models:
+        cases = by_case[model]
+        if not cases:
+            continue
+        rate = {c: (sum(r["status"] == "pass" for r in t), len(t)) for c, t in cases.items()}
+        flaky = sorted((c for c, (p, n) in rate.items() if 0 < p < n), key=lambda c: rate[c][0] / rate[c][1])
+        failing = sorted(c for c, (p, _) in rate.items() if p == 0)
+        stable = len(rate) - len(flaky) - len(failing)
+        print(
+            f"\n{model}: {stable} always pass, {len(flaky)} flaky, {len(failing)} always fail"
+            f" (of {len(rate)} cases)"
+        )
+        for label, names in (("flaky", flaky), ("fails", failing)):
+            for case in names:
+                passed, total = rate[case]
+                print(f"  {label}  {case}  {passed}/{total}  {first_reason(cases[case])}")
 
 
 async def main_async(args: argparse.Namespace) -> None:
@@ -197,6 +278,8 @@ async def main_async(args: argparse.Namespace) -> None:
 
     print()
     print_table(results, models)
+    print_cost(results, models)
+    print_reliability(results, models)
 
     RESULTS_DIR.mkdir(exist_ok=True)
     out = RESULTS_DIR / f"{datetime.now():%Y%m%d-%H%M%S}.json"

@@ -316,3 +316,145 @@ async def test_main_filters_and_rejects_empty_selection(runner_env):
         await runner.main_async(args(case=["does-not-exist"]))
     with pytest.raises(SystemExit, match="no cases selected"):
         await runner.main_async(args(tier=["hard"]))
+
+
+# ---------------------------------------------------------------------------
+# Reliability across repeated trials
+# ---------------------------------------------------------------------------
+
+
+def trial_result(model, case, status, failures=()):
+    return {**result(model, case, "memory", "easy", status), "failures": list(failures)}
+
+
+def test_reliability_separates_stable_flaky_and_always_failing_cases(capsys):
+    results = [
+        *[trial_result("m", "solid", "pass") for _ in range(3)],
+        trial_result("m", "flaky-one", "pass"),
+        trial_result("m", "flaky-one", "fail", ["todo.md was not created"]),
+        trial_result("m", "flaky-one", "pass"),
+        trial_result("m", "flakier", "fail", ["wrong tool"]),
+        trial_result("m", "flakier", "pass"),
+        trial_result("m", "flakier", "error", ["ConnectionError: dropped"]),
+        *[trial_result("m", "broken", "fail", ["missing call"]) for _ in range(3)],
+    ]
+    runner.print_reliability(results, ["m"])
+    lines = capsys.readouterr().out.strip().splitlines()
+
+    assert lines[0] == "m: 1 always pass, 2 flaky, 1 always fail (of 4 cases)"
+    # worst first, with the reason from the first trial that did not pass
+    assert lines[1].split(None, 3) == ["flaky", "flakier", "1/3", "wrong tool"]
+    assert lines[2].split(None, 3) == ["flaky", "flaky-one", "2/3", "todo.md was not created"]
+    assert lines[3].split(None, 3) == ["fails", "broken", "0/3", "missing call"]
+
+
+def test_an_error_counts_as_a_non_pass_in_the_reliability_report(capsys):
+    results = [
+        trial_result("m", "c", "pass"),
+        trial_result("m", "c", "error", ["ConnectionError: dropped"]),
+    ]
+    runner.print_reliability(results, ["m"])
+    assert "1 flaky" in capsys.readouterr().out
+
+
+def test_reliability_is_silent_when_every_case_ran_once(capsys):
+    runner.print_reliability([trial_result("m", "a", "pass"), trial_result("m", "b", "fail")], ["m"])
+    assert capsys.readouterr().out == ""
+
+
+def test_reliability_skips_a_model_with_no_results(capsys):
+    results = [trial_result("m1", "a", "pass"), trial_result("m1", "a", "fail", ["x"])]
+    runner.print_reliability(results, ["m1", "m2"])
+    out = capsys.readouterr().out
+    assert "m1:" in out and "m2" not in out
+
+
+async def test_main_prints_the_reliability_report_when_trials_repeat(runner_env, capsys):
+    await runner.main_async(args(trials=2))
+    assert "local: 1 always pass, 0 flaky, 0 always fail (of 1 cases)" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Tokens and latency
+# ---------------------------------------------------------------------------
+
+
+def costed(model, seconds, calls=None, prompt=None, completion=None):
+    extra = {"model_calls": calls, "prompt_tokens": prompt, "completion_tokens": completion}
+    return {
+        **result(model, "a", "memory", "easy", "pass", seconds),
+        **{k: v for k, v in extra.items() if v is not None},
+    }
+
+
+def test_print_cost_averages_speed_and_tokens_per_trial(capsys):
+    results = [
+        costed("m", 1.0, calls=2, prompt=100, completion=10),
+        costed("m", 2.0, calls=4, prompt=300, completion=30),
+        costed("m", 9.0, calls=3, prompt=200, completion=20),
+    ]
+    runner.print_cost(results, ["m"])
+    header, _, row = capsys.readouterr().out.strip().splitlines()
+    assert header.split() == [
+        "model",
+        "trials",
+        "avg",
+        "s",
+        "median",
+        "s",
+        "max",
+        "s",
+        "model",
+        "calls",
+        "prompt",
+        "tok",
+        "output",
+        "tok",
+    ]
+    assert row.split() == ["m", "3", "4.0", "2.0", "9.0", "3.0", "200", "20"]
+
+
+def test_print_cost_median_of_an_even_number_of_trials(capsys):
+    runner.print_cost([costed("m", 1.0), costed("m", 3.0)], ["m"])
+    assert capsys.readouterr().out.strip().splitlines()[-1].split()[2:5] == ["2.0", "2.0", "3.0"]
+
+
+def test_print_cost_shows_a_dash_not_zero_when_the_provider_reports_no_tokens(capsys):
+    runner.print_cost([costed("m", 1.0, calls=2)], ["m"])
+    row = capsys.readouterr().out.strip().splitlines()[-1].split()
+    assert row[-3:] == ["2.0", "-", "-"]
+
+
+def test_print_cost_averages_tokens_only_over_trials_that_reported_them(capsys):
+    results = [costed("m", 1.0, calls=1, prompt=100, completion=10), costed("m", 1.0, calls=1)]
+    runner.print_cost(results, ["m"])
+    assert capsys.readouterr().out.strip().splitlines()[-1].split()[-2:] == ["100", "10"]
+
+
+def test_print_cost_skips_a_model_with_no_results(capsys):
+    runner.print_cost([costed("m1", 1.0)], ["m1", "m2"])
+    out = capsys.readouterr().out
+    assert "m1" in out and "m2" not in out
+
+
+async def test_a_trial_records_model_calls_and_tokens(connected_harness, monkeypatch):
+    use_fake_model(
+        monkeypatch,
+        reply(tool_calls=[tool_call("workspace__write_file", WRITE_TODO)], tokens=(120, 15)),
+        reply("done", tokens=(180, 5)),
+    )
+    async with connected_harness() as (workspace, memory):
+        r = await runner.run_trial(WRITE_CASE, "local", workspace, memory)
+    assert (r["model_calls"], r["prompt_tokens"], r["completion_tokens"]) == (2, 300, 20)
+
+
+async def test_a_crashed_trial_keeps_the_usage_it_had_already_used(connected_harness, monkeypatch):
+    use_fake_model(
+        monkeypatch,
+        reply(tool_calls=[tool_call("workspace__list_files", {})], tokens=(50, 5)),
+        ConnectionError("dropped"),
+    )
+    async with connected_harness() as (workspace, memory):
+        r = await runner.run_trial(WRITE_CASE, "local", workspace, memory)
+    assert r["status"] == "error"
+    assert (r["model_calls"], r["prompt_tokens"]) == (1, 50)

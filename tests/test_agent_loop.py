@@ -313,3 +313,42 @@ async def test_short_error_results_are_not_mangled(connected_harness):
     async with connected_harness():
         result = await harness.call_tool("nope__missing", {})
     assert result == "error: unknown tool nope__missing"
+
+
+async def test_usage_sums_every_model_call_in_the_turn(connected_harness):
+    fake = FakeClient(
+        reply(tool_calls=[tool_call("workspace__list_files", {})], tokens=(100, 10)),
+        reply("done", tokens=(150, 20)),
+    )
+    usage: dict = {}
+    async with connected_harness():
+        await harness.run_agent("ls", history=[], client=fake, verbose=False, usage=usage)
+    assert usage == {"model_calls": 2, "prompt_tokens": 250, "completion_tokens": 30}
+
+
+async def test_usage_counts_the_retry_after_an_empty_reply(connected_harness):
+    fake = FakeClient(reply("", tokens=(100, 0)), reply("ok", tokens=(100, 5)))
+    usage: dict = {}
+    async with connected_harness():
+        await harness.run_agent("hi", history=[], client=fake, verbose=False, usage=usage)
+    assert usage == {"model_calls": 2, "prompt_tokens": 200, "completion_tokens": 5}
+
+
+async def test_usage_without_reported_tokens_counts_calls_but_invents_no_tokens(connected_harness):
+    usage: dict = {}
+    async with connected_harness():
+        await harness.run_agent("hi", history=[], client=FakeClient(reply("ok")), verbose=False, usage=usage)
+    assert usage == {"model_calls": 1}
+
+
+async def test_streamed_usage_is_requested_only_when_a_usage_dict_is_given(connected_harness):
+    asked, not_asked = FakeClient(reply("ok", tokens=(7, 3))), FakeClient(reply("ok", tokens=(7, 3)))
+    usage: dict = {}
+    async with connected_harness():
+        await harness.run_agent(
+            "hi", history=[], client=asked, verbose=False, on_text=lambda _: None, usage=usage
+        )
+        await harness.run_agent("hi", history=[], client=not_asked, verbose=False, on_text=lambda _: None)
+    assert usage == {"model_calls": 1, "prompt_tokens": 7, "completion_tokens": 3}
+    assert asked.stream_options == [{"include_usage": True}]
+    assert not_asked.stream_options == [None]  # providers that reject the option are never sent it

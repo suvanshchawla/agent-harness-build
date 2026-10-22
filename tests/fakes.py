@@ -8,8 +8,14 @@ def tool_call(name, args, call_id="call_1"):
     return SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=json.dumps(args)))
 
 
-def reply(content=None, tool_calls=None, reasoning=None):
-    return SimpleNamespace(content=content, tool_calls=tool_calls, reasoning=reasoning)
+def reply(content=None, tool_calls=None, reasoning=None, tokens=None):
+    """tokens=(prompt, completion) is what the fake provider reports for the call that returns this."""
+    return SimpleNamespace(content=content, tool_calls=tool_calls, reasoning=reasoning, tokens=tokens)
+
+
+def usage_of(message):
+    tokens = getattr(message, "tokens", None)
+    return SimpleNamespace(prompt_tokens=tokens[0], completion_tokens=tokens[1]) if tokens else None
 
 
 def chunk(content=None, tool_calls=None, reasoning=None):
@@ -26,17 +32,19 @@ class FakeClient:
 
     def __init__(self, *script):
         self.script = list(script)
+        self.stream_options: list = []  # the stream_options each call was made with
         self.requests: list[list] = []  # a snapshot of the conversation sent on each call
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
-    async def _create(self, model, messages, tools, stream=False):
+    async def _create(self, model, messages, tools, stream=False, stream_options=None):
+        self.stream_options.append(stream_options)
         self.requests.append(list(messages))
         message = self.script.pop(0) if len(self.script) > 1 else self.script[0]
         if isinstance(message, Exception):  # a scripted API failure, e.g. a 400
             raise message
         if stream:
             return self._stream(message)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage_of(message))
 
     async def _stream(self, message, size=3):
         """Replay a scripted message as chunks: text in pieces of `size` characters, and each
@@ -54,4 +62,6 @@ class FakeClient:
                 yield chunk(tool_calls=[fragment(index, arguments=args[i : i + size])])
         if getattr(message, "fail", None):  # the connection drops mid-reply
             raise message.fail
-        yield SimpleNamespace(choices=[])  # a usage-only chunk, as some providers send
+        # the closing usage-only chunk some providers send; only when asked for, as with the real API
+        wants = (self.stream_options[-1] or {}).get("include_usage")
+        yield SimpleNamespace(choices=[], usage=usage_of(message) if wants else None)

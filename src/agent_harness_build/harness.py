@@ -217,6 +217,16 @@ EMPTY_RETRIES = 1  # extra attempts when the model sends neither text nor tool c
 EMPTY_NOTICE = "(the model returned an empty response)"
 
 
+def record_usage(usage: dict, reported) -> None:
+    """Add one model call to the running totals. Token counts are only added when the provider
+    reported them, so a missing count stays missing instead of turning into a misleading zero."""
+    usage["model_calls"] = usage.get("model_calls", 0) + 1
+    for key in ("prompt_tokens", "completion_tokens"):
+        count = getattr(reported, key, None)
+        if count is not None:
+            usage[key] = usage.get(key, 0) + count
+
+
 def parse_arguments(raw: str | None) -> tuple[dict | str, str | None]:
     """Parse a tool call's JSON arguments. Returns (args, None), or (raw, error) if they are unusable.
 
@@ -300,7 +310,11 @@ async def execute_tool_calls(
 
 
 async def stream_completion(
-    client: AsyncOpenAI, model: str, history: list, on_text: Callable[[str], None] | None = None
+    client: AsyncOpenAI,
+    model: str,
+    history: list,
+    on_text: Callable[[str], None] | None = None,
+    want_usage: bool = False,
 ) -> SimpleNamespace:
     """Make one streamed model call and assemble the chunks into a single message.
 
@@ -309,14 +323,17 @@ async def stream_completion(
     together here. The result has the same .content / .tool_calls shape as a non-streamed
     message, so the loop after this call doesn't care which way it was made.
     """
+    extra = {"stream_options": {"include_usage": True}} if want_usage else {}  # not every provider takes it
     stream = await client.chat.completions.create(
-        model=model, messages=history, tools=TOOL_SCHEMAS, stream=True
+        model=model, messages=history, tools=TOOL_SCHEMAS, stream=True, **extra
     )
+    reported = None
     text: list[str] = []
     thinking: list[str] = []
     parts: dict[int, dict] = {}  # tool call index -> {"id", "name", "arguments"}
     async for chunk in stream:
         if not chunk.choices:  # some providers end with a usage-only chunk
+            reported = getattr(chunk, "usage", None) or reported
             continue
         delta = chunk.choices[0].delta
         thinking.append(getattr(delta, "reasoning", None) or "")
@@ -335,7 +352,9 @@ async def stream_completion(
         SimpleNamespace(id=p["id"], function=SimpleNamespace(name=p["name"], arguments=p["arguments"]))
         for _, p in sorted(parts.items())
     ]
-    return SimpleNamespace(content="".join(text), tool_calls=calls or None, reasoning="".join(thinking))
+    return SimpleNamespace(
+        content="".join(text), tool_calls=calls or None, reasoning="".join(thinking), usage=reported
+    )
 
 
 def as_history_entry(message) -> dict:
@@ -391,6 +410,7 @@ async def run_agent(
     approve: Approver | None = None,
     parallel: bool = True,
     on_text: Callable[[str], None] | None = None,
+    usage: dict | None = None,
 ) -> str:
     """Run one user turn to completion.
 
@@ -406,6 +426,10 @@ async def run_agent(
 
     on_text switches on streaming: the model call is streamed and each piece of text is
     passed to on_text as it arrives. The return value is still the full final answer.
+
+    If usage is given, it is filled in with "model_calls" and, when the provider reports them,
+    "prompt_tokens" and "completion_tokens", summed over every model call in the turn
+    (retries after an empty reply included, since they cost tokens too).
     """
     history = messages if history is None else history
     cfg = MODELS[model or model_name]
@@ -417,12 +441,18 @@ async def run_agent(
         for _ in range(MAX_STEPS):
             for attempt in range(EMPTY_RETRIES + 1):
                 if on_text:
-                    message = await stream_completion(client, cfg.model, history, on_text)
+                    message = await stream_completion(
+                        client, cfg.model, history, on_text, want_usage=usage is not None
+                    )
+                    reported = message.usage
                 else:
                     response = await client.chat.completions.create(
                         model=cfg.model, messages=history, tools=TOOL_SCHEMAS
                     )
                     message = response.choices[0].message
+                    reported = getattr(response, "usage", None)
+                if usage is not None:
+                    record_usage(usage, reported)
                 if message.tool_calls or (message.content or "").strip():
                     break
                 if verbose and attempt < EMPTY_RETRIES:

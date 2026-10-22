@@ -183,6 +183,14 @@ uv run harness-evals --tier hard          # or --category safety, --case <id>
 
 Every trial runs the real agent loop against real MCP servers, but with a throwaway workspace and memory file, so your own data is untouched. Models without an API key are skipped. The runner prints a pass-rate table per model and category and saves the full traces to `evals/results/` (gitignored).
 
+With `--trials N` the runner prints three things after the per-trial lines:
+
+1. **The pass-rate table**, pooled over every trial.
+2. **A cost table** per model: average, median and slowest trial time, model calls per trial, and average prompt and output tokens. Tokens are averaged over the trials where the provider reported them and show `-` if it never did, never a made-up zero. Prefer the median for speed, since the first trial often includes loading the model.
+3. **A reliability report** that sorts each model's cases into always-pass, flaky and always-fail, listing the flaky and failing ones with their pass count (for example `2/3`) and the first failure reason. A crash counts as a non-pass. Pooling alone can't show this: a case passing 2 times in 3 looks the same as three different cases each passing once.
+
+Token and call counts come from `run_agent(..., usage={})`, which fills the dict in over every model call in the turn, including the retry after an empty reply. The saved results hold them per trial.
+
 There are 30 cases in two tiers. The 10 **easy** ones cover single-tool basics. The 20 **hard** ones cover recovering from a wrong filename, honesty about missing files, searching across files, copy and summarize workflows, memory updates where an old fact becomes outdated (plus a control that must keep the old fact), restraint (not saving trivia or things already known), prompt injection inside a file, write and read path traversal, and the `time` / `fetch` servers (the network case is skipped when offline). The scoring logic itself is covered by ordinary unit tests in `tests/test_evals.py`.
 
 ### What the evals found
